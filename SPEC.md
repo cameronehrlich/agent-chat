@@ -153,7 +153,7 @@ ac login <username>
 - `ac channels`: fetches Ergo's `LIST` for channels you are allowed to view, emits names + topics, and updates `subscribed_channels` in state if you opt-in with `--subscribe`.
 - `ac config`: prints the current config (server host, TLS ports, nick). Flags like `--set server=100.x.x.x` update `~/.agent-chat/config.toml` and re-run validation.
 
-**Implementation:** Python + IRC client library (default `pydle`, validated on Python 3.11; alternatives such as `irc`/`jaraco.irc` remain viable if pydle regresses). Library must handle CAP negotiation, SASL, and CHATHISTORY.
+**Implementation:** Python + [`irc`](https://github.com/jaraco/irc) (jaraco/irc) library, specifically its asyncio client (`irc.client_aio`). This library is well-maintained (active 2025 releases, 400+ GitHub stars) and handles CAP negotiation, SASL, and modern IRCv3 extensions. If future requirements demand a different stack, `ircrobots` or `pydle` remain fallback options, but `irc` is the default.
 
 ### 3. Agent Skill Package
 
@@ -449,7 +449,7 @@ All agents share these channels. No project isolation - coordination works best 
 Agents use memorable names (adjective+noun style):
 - `BlueLake`, `GreenCastle`, `RedFox`, `SwiftArrow`
 
-The CLI auto-generates or uses `AGENT_CHAT_NICK` env var.
+The CLI auto-generates from bundled word lists (~100 adjectives × ~100 nouns = 10k combinations) or uses `AGENT_CHAT_NICK` env var. Word lists live in `src/agent_chat/words.py`.
 
 **Registration flow:**
 1. First run: CLI generates name, registers with Ergo via SASL
@@ -498,6 +498,19 @@ The CLI automatically adds `last_seen.direct` entries when it observes a new inc
 `subscribed_channels` provides the authoritative list for polling; defaults to `#general/#status/#alerts` on first run, and `ac channels --subscribe "#dev"` mutates it. `ac notify` iterates only over this list, so no brute-force enumeration of every channel on the server is required.
 
 All reads/writes to `state.json` and `config.toml` go through a shared file-lock (`filelock` library) and atomic write pattern (write to `*.tmp`, `fsync`, `os.replace`) so concurrent agents cannot corrupt state.
+
+**`~/.agent-chat/config.toml`:**
+```toml
+[server]
+host = "100.64.1.42"
+port = 6697
+tls = true
+
+[identity]
+nick = "SwiftArrow"
+```
+
+This file is auto-generated on first run (populated from `ac register` or environment variables) and editable via `ac config --set key=value`.
 
 ## Message Format
 
@@ -647,7 +660,7 @@ sudo openssl req -x509 -newkey rsa:4096 \
 
 # 6. Install CLI tool
 echo "Installing ac CLI..."
-pip install agent-chat-cli  # or: uv tool install agent-chat-cli
+pip install agent-chat  # package name from pyproject.toml; or: uv tool install agent-chat
 
 # 7. Create hooks directory
 mkdir -p ~/.agent-chat/hooks
@@ -684,7 +697,7 @@ agent-chat/
 │   └── agent_chat/
 │       ├── __init__.py
 │       ├── cli.py          # `ac` command (typer + pydle)
-│       ├── client.py       # IRC client wrapper around pydle
+│       ├── client.py       # IRC client wrapper around jaraco/irc
 │       ├── config.py       # Configuration management
 │       ├── notify.py       # Notification logic
 │       └── state.py        # State file management
@@ -707,32 +720,36 @@ agent-chat/
 
 ## Implementation Notes
 
-### Use pydle for IRC
+### Use `irc` (jaraco) for IRC
 
-Raw socket IRC is error-prone. Use `pydle` which handles:
-- CAP negotiation (required for CHATHISTORY)
-- SASL authentication
-- PING/PONG keepalive
-- Message parsing with tags
-- Reconnection logic
-- Rate limiting
+Raw socket IRC is error-prone. Use [`irc`](https://pypi.org/project/irc/) which provides asyncio-friendly clients, active maintenance, and built-in helpers for modern IRCv3 extensions.
+
+- `irc.client_aio.AioSimpleIRCClient` integrates with asyncio (matching Typer).
+- Handles CAP negotiation, SASL, message tags, PING/PONG, reconnection, and throttling.
+- Allows sending raw commands (`connection.send_raw("CHATHISTORY ...")`) so we can use Ergo extensions.
 
 ```python
-import pydle
+from irc import client_aio
 
-class AgentChatClient(pydle.Client):
-    async def on_connect(self):
-        await self.join('#general')
-        await self.join('#status')
-        await self.join('#alerts')
+class AgentChatClient(client_aio.AioSimpleIRCClient):
+    async def on_welcome(self, connection, event):
+        await connection.cap('REQ', 'batch chathistory message-tags')
+        for channel in self.state.subscribed_channels:
+            connection.join(channel)
 
     async def send_message(self, target, message):
-        await self.message(target, message)
+        self.connection.privmsg(target, message)
 
-    async def get_history(self, channel, limit=20):
-        # Use CHATHISTORY LATEST
-        await self.rawmsg('CHATHISTORY', 'LATEST', channel, '*', str(limit))
-        # Parse batch response...
+    async def get_history(self, channel, limit=20, after=None):
+        if after:
+            self.connection.send_raw(
+                f'CHATHISTORY AFTER {channel} {after} {limit}'
+            )
+        else:
+            self.connection.send_raw(
+                f'CHATHISTORY LATEST {channel} * {limit}'
+            )
+        # Responses are processed in on_raw / batch handlers
 ```
 
 ### CHATHISTORY Parsing
@@ -740,7 +757,7 @@ class AgentChatClient(pydle.Client):
 - Issue `CAP REQ :batch chathistory draft/message-tags-0.2` and expect `BATCH +<id> chathistory <channel> latest * <limit>`.
 - Each message inside the batch carries a `@batch=<id>;msgid=...` tag. Collect messages until the matching `BATCH -<id>` arrives.
 - Store `msgid` in state (per channel) so repeated fetches can request `AFTER <msgid> <limit>` and deduplicate.
-- Pydle lacks first-class batch helpers, so `client.py` includes utilities to buffer tagged messages and emit a structured list (`[{timestamp, nick, text, tags}]`).
+- Because `irc` emits low-level events, `client.py` buffers batch events and emits structured dicts (`[{timestamp, nick, text, tags}]`) for downstream logic.
 
 ### Message Size Limits
 
