@@ -202,7 +202,7 @@ Run: ac listen ${target:---all} --last ${count:-10}
 
 ### 4. PM2 Ecosystem
 
-**`ecosystem.config.js`:**
+**`server/ecosystem.config.js`:**
 ```javascript
 module.exports = {
   apps: [
@@ -222,7 +222,7 @@ module.exports = {
 
 **Management:**
 ```bash
-pm2 start ecosystem.config.js
+pm2 start server/ecosystem.config.js
 pm2 logs agent-chat
 pm2 save  # persist across reboots
 pm2 startup  # auto-start on boot
@@ -376,6 +376,11 @@ ac notify
 
 **Implementation:** CLI tracks per-channel and per-direct message timestamps in `~/.agent-chat/state.json`. On `notify`, it connects to Ergo, queries CHATHISTORY for each target since the corresponding timestamp, and updates the cache before disconnecting.
 
+**Direct-message targets:** The CLI auto-maintains `last_seen.direct` by:
+- Adding an entry the first time it sees an incoming `PRIVMSG` addressed to you.
+- Ensuring an entry exists whenever you send `ac send "@Nick" ...`.
+- Pruning entries that have been idle for 30 days so the poll list stays small.
+
 ### Urgency Signaling
 
 Messages can be marked urgent with `!urgent` prefix:
@@ -477,6 +482,7 @@ The CLI auto-generates or uses `AGENT_CHAT_NICK` env var.
 ```
 
 When `/listen #general` runs, update `last_seen.channels["#general"]` to now. Direct conversations (`/listen @BlueLake`) update `last_seen.direct["@BlueLake"]`, which drives the `@BlueLake(n)` counters shown in notifications.
+The CLI automatically adds `last_seen.direct` entries when it observes a new incoming `@Nick` message or you initiate a DM, and removes ones that have been idle for 30 days so the list reflects current conversations.
 
 ## Message Format
 
