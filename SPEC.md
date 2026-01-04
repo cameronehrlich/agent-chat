@@ -139,16 +139,21 @@ ac who                              # list online users
 ac notify                           # check unread counts (for hooks)
 ac notify --json                    # JSON format for scripts
 ac notify --oneline                 # compact for tmux
-
-# Interactive TUI (persistent connection)
-ac tui
+ac status                           # connectivity + auth check (pings Ergo)
+ac channels                         # list visible channels + membership
+ac config                           # view/update server/identity settings
 
 # Account management
 ac register <username> <password>
 ac login <username>
 ```
 
-**Implementation:** Python + `pydle` for IRC protocol (handles CAP negotiation, SASL, CHATHISTORY properly).
+**Command details:**
+- `ac status`: connects using stored credentials, performs CAP negotiation, and emits a short health summary (latency, auth success, channel join ability). Returns non-zero on failure so CI/hooks can gate usage.
+- `ac channels`: fetches Ergo's `LIST` for channels you are allowed to view, emits names + topics, and updates `subscribed_channels` in state if you opt-in with `--subscribe`.
+- `ac config`: prints the current config (server host, TLS ports, nick). Flags like `--set server=100.x.x.x` update `~/.agent-chat/config.toml` and re-run validation.
+
+**Implementation:** Python + IRC client library (default `pydle`, validated on Python 3.11; alternatives such as `irc`/`jaraco.irc` remain viable if pydle regresses). Library must handle CAP negotiation, SASL, and CHATHISTORY.
 
 ### 3. Agent Skill Package
 
@@ -336,7 +341,7 @@ LINE=$(printf '%s' "$NOTIFY" | format_line)
 printf '%s\n' "$LINE" | tee "$CACHE_FILE" >/dev/null
 ```
 
-*This hook only depends on `python3`, which ships with macOS and most Linux distros—no `jq` requirement.*
+*This hook only depends on `python3`, which ships with macOS and most Linux distros—no `jq` requirement. The 30-second cache keeps the Python startup overhead (~100ms) acceptable; a future enhancement could move this logic into a tiny long-running daemon, but v1 intentionally favors simplicity.*
 
 ### tmux Status Bar Integration
 
@@ -468,7 +473,12 @@ The CLI auto-generates or uses `AGENT_CHAT_NICK` env var.
     "direct": {
       "@BlueLake": "2024-01-15T10:10:00Z"
     }
-  }
+  },
+  "subscribed_channels": [
+    "#general",
+    "#status",
+    "#alerts"
+  ]
 }
 ```
 
@@ -476,13 +486,18 @@ The CLI auto-generates or uses `AGENT_CHAT_NICK` env var.
 ```json
 {
   "nick": "SwiftArrow",
-  "password": "generated-secure-password",
   "registered": true
 }
 ```
 
+Actual passwords live in the OS keychain via the `keyring` library (e.g., macOS Keychain Access). The JSON file only tracks non-secret metadata (`nick`, flags). During login the CLI fetches the secret from keychain, and `ac register` stores it there.
+
 When `/listen #general` runs, update `last_seen.channels["#general"]` to now. Direct conversations (`/listen @BlueLake`) update `last_seen.direct["@BlueLake"]`, which drives the `@BlueLake(n)` counters shown in notifications.
 The CLI automatically adds `last_seen.direct` entries when it observes a new incoming `@Nick` message or you initiate a DM, and removes ones that have been idle for 30 days so the list reflects current conversations.
+
+`subscribed_channels` provides the authoritative list for polling; defaults to `#general/#status/#alerts` on first run, and `ac channels --subscribe "#dev"` mutates it. `ac notify` iterates only over this list, so no brute-force enumeration of every channel on the server is required.
+
+All reads/writes to `state.json` and `config.toml` go through a shared file-lock (`filelock` library) and atomic write pattern (write to `*.tmp`, `fsync`, `os.replace`) so concurrent agents cannot corrupt state.
 
 ## Message Format
 
@@ -552,7 +567,7 @@ ac tui  # Interactive TUI with persistent connection
 
 ## Installation Script
 
-**`install.sh`:**
+**`install.sh` (macOS 14+, Homebrew-based):**
 ```bash
 #!/bin/bash
 set -euo pipefail
@@ -562,6 +577,10 @@ echo "=== Agent Chat Installer ==="
 # 1. Install Ergo
 if ! command -v ergo &> /dev/null; then
     echo "Installing Ergo IRC server..."
+    if [[ "$(uname)" != "Darwin" ]]; then
+        echo "Error: automated install currently supports macOS only."
+        exit 1
+    fi
     brew install ergo
 fi
 
@@ -652,6 +671,8 @@ echo "CLI: ac send '#general' 'hello world'"
 echo "Connect from any device on your Tailscale network!"
 ```
 
+*Linux install instructions will ship separately; for now, non-macOS hosts should follow manual setup steps in `server/README.md`.*
+
 ## Project Structure
 
 ```
@@ -676,6 +697,10 @@ agent-chat/
 ├── server/
 │   ├── ircd.yaml.template  # Ergo config template
 │   └── ecosystem.config.js # PM2 config
+├── tests/                  # pytest suites for CLI + notify logic
+├── .github/
+│   └── workflows/
+│       └── ci.yml          # lint + pytest via GitHub Actions
 └── scripts/
     └── install.sh
 ```
@@ -710,6 +735,13 @@ class AgentChatClient(pydle.Client):
         # Parse batch response...
 ```
 
+### CHATHISTORY Parsing
+
+- Issue `CAP REQ :batch chathistory draft/message-tags-0.2` and expect `BATCH +<id> chathistory <channel> latest * <limit>`.
+- Each message inside the batch carries a `@batch=<id>;msgid=...` tag. Collect messages until the matching `BATCH -<id>` arrives.
+- Store `msgid` in state (per channel) so repeated fetches can request `AFTER <msgid> <limit>` and deduplicate.
+- Pydle lacks first-class batch helpers, so `client.py` includes utilities to buffer tagged messages and emit a structured list (`[{timestamp, nick, text, tags}]`).
+
 ### Message Size Limits
 
 IRC messages are limited to ~512 bytes. For long messages:
@@ -723,12 +755,35 @@ Ergo has flood protection. Client-side:
 - Queue messages, send max 3/second
 - pydle handles this automatically
 
+## Error Handling
+
+- `ac status` / `ac send` exit codes:
+  - `0`: success.
+  - `2`: network/socket failures (server unreachable, TLS issues). Prints actionable message and suggests `ac status`.
+  - `3`: authentication failures (wrong password, SASL reject); automatically prompts to re-run `ac login`.
+  - `4`: rate-limit from Ergo (`ERR_LOADTHROTTLE`), instructing user to retry later.
+- All commands print concise errors to stderr plus `--verbose` detail (stack traces, CAP transcripts).
+- `ac notify` degrades gracefully: on error it logs the failure and returns an empty string so hooks don't block tool use.
+
+## Logging
+
+- Default log location: `~/.agent-chat/logs/ac.log` (rotated at 5 MB, keep 3 files).
+- `-v/--verbose` mirrors log output to stderr for interactive debugging.
+- Sensitive data (passwords, SASL payloads) are redacted before logging.
+
+## Testing
+
+- **Unit tests (`pytest`)** cover `config.py`, `state.py` (including atomic writes + locking), and notification parsing/formatting (channel + DM counts). Mocks simulate pydle responses, including CHATHISTORY batches.
+- **Integration tests** spin up an ephemeral Ergo container (via `docker compose`) and run `ac status`, `ac notify`, and `ac channels` against it on CI.
+- **CLI snapshot tests** confirm help text and error messages stay stable.
+
 ## Future Considerations
 
 - **Bridge to Slack/Discord** - for teams on those platforms
 - **Web client** - quick access without native client
 - **Search** - full-text search over history
 - **Bots** - CI/CD notifications, PR updates to #alerts
+- **Interactive TUI** - `textual`-based client for humans who prefer persistent views
 
 ---
 
