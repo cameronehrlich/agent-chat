@@ -696,7 +696,7 @@ agent-chat/
 ├── src/
 │   └── agent_chat/
 │       ├── __init__.py
-│       ├── cli.py          # `ac` command (typer + pydle)
+│       ├── cli.py          # `ac` command (Typer + asyncio + jaraco/irc)
 │       ├── client.py       # IRC client wrapper around jaraco/irc
 │       ├── config.py       # Configuration management
 │       ├── notify.py       # Notification logic
@@ -770,7 +770,7 @@ IRC messages are limited to ~512 bytes. For long messages:
 
 Ergo has flood protection. Client-side:
 - Queue messages, send max 3/second
-- pydle handles this automatically
+- the `irc` client enforces this automatically (built-in throttle)
 
 ## Error Handling
 
@@ -790,7 +790,7 @@ Ergo has flood protection. Client-side:
 
 ## Testing
 
-- **Unit tests (`pytest`)** cover `config.py`, `state.py` (including atomic writes + locking), and notification parsing/formatting (channel + DM counts). Mocks simulate pydle responses, including CHATHISTORY batches.
+- **Unit tests (`pytest`)** cover `config.py`, `state.py` (including atomic writes + locking), and notification parsing/formatting (channel + DM counts). Mocks simulate jaraco/irc events, including CHATHISTORY batches.
 - **Integration tests** spin up an ephemeral Ergo container (via `docker compose`) and run `ac status`, `ac notify`, and `ac channels` against it on CI.
 - **CLI snapshot tests** confirm help text and error messages stay stable.
 
