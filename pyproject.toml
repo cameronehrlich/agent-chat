@@ -39,7 +39,9 @@ where = ["src"]
 addopts = "-q"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: integration tests requiring Docker"
+]
 
 [tool.ruff]
 line-length = 100
-

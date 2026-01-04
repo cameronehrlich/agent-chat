@@ -33,7 +33,60 @@ def _tags_to_dict(tags) -> Dict[str, Optional[str]]:
     return data
 
 
+class AgentConnection(client_aio.AioConnection):
+    async def connect(
+        self,
+        server,
+        port,
+        nickname,
+        password=None,
+        username=None,
+        ircname=None,
+        connect_factory=irc_connection.AioFactory(),
+    ):
+        if self.connected:
+            self.disconnect("Changing servers")
+
+        self.buffer = self.buffer_class()
+        self.handlers = {}
+        self.real_server_name = ""
+        self.real_nickname = nickname
+        self.server = server
+        self.port = port
+        self.server_address = (server, port)
+        self.nickname = nickname
+        self.username = username or nickname
+        self.ircname = ircname or nickname
+        self.password = password
+        self.connect_factory = connect_factory
+
+        protocol_instance = self.protocol_class(self, self.reactor.loop)
+        connection = self.connect_factory(protocol_instance, self.server_address)
+        transport, protocol = await connection
+
+        self.transport = transport
+        self.protocol = protocol
+        self.connected = True
+        self.reactor._on_connect(self.protocol, self.transport)
+
+        if self.password:
+            self.pass_(self.password)
+        caps = getattr(self, "requested_capabilities", [])
+        if caps:
+            self.cap("REQ", " ".join(caps))
+            self.cap("END")
+        self.nick(self.nickname)
+        self.user(self.username, self.ircname)
+        return self
+
+
+class AgentReactor(client_aio.AioReactor):
+    connection_class = AgentConnection
+
+
 class IRCSession(client_aio.AioSimpleIRCClient):
+    reactor_class = AgentReactor
+
     def __init__(
         self,
         config: AgentChatConfig,
@@ -45,6 +98,7 @@ class IRCSession(client_aio.AioSimpleIRCClient):
         self._on_ready = on_ready
         self._loop = asyncio.new_event_loop()
         self.loop = self._loop
+        self.loop = self._loop
         self._completed: asyncio.Future[None] = self._loop.create_future()
         try:
             self._previous_loop = asyncio.get_event_loop()
@@ -54,6 +108,7 @@ class IRCSession(client_aio.AioSimpleIRCClient):
         super().__init__()
         if self._previous_loop is not None:
             asyncio.set_event_loop(self._previous_loop)
+        self.connection.requested_capabilities = ["batch", "chathistory", "message-tags"]
         self.connection.add_global_handler("disconnect", self._on_disconnect, -10)
         self.connection.add_global_handler("all_events", self._log_events, -50)
 
@@ -65,8 +120,6 @@ class IRCSession(client_aio.AioSimpleIRCClient):
             self._completed.set_result(None)
 
     async def _handle_ready(self):
-        self.connection.cap('REQ', 'batch chathistory message-tags')
-        self.connection.cap('END')
         await self._on_ready(self)
         self.connection.quit("done")
 
@@ -153,7 +206,20 @@ class IRCSession(client_aio.AioSimpleIRCClient):
         log.debug("Issuing %s", command)
         self.connection.send_raw(command)
 
-        return await asyncio.wait_for(future, timeout=10)
+        try:
+            return await asyncio.wait_for(future, timeout=10)
+        except asyncio.TimeoutError:
+            log.warning("CHATHISTORY timeout for %s", channel)
+            return []
+        finally:
+            try:
+                self.connection.remove_global_handler("batch", on_batch)
+            except ValueError:
+                pass
+            try:
+                self.connection.remove_global_handler("privmsg", on_privmsg)
+            except ValueError:
+                pass
 
 
 def run_with_client(

@@ -14,21 +14,6 @@ CONFIG_FILE = APP_DIR / "config.toml"
 CREDENTIALS_FILE = APP_DIR / "credentials.json"
 LOCK_FILE = CONFIG_FILE.with_suffix(".lock")
 SERVICE_NAME = "agent-chat"
-
-try:
-    import keyring  # type: ignore
-except ImportError:  # pragma: no cover - fallback when keyring unavailable
-    class _MemoryKeyring:
-        def __init__(self) -> None:
-            self._store: Dict[tuple[str, str], str] = {}
-
-        def set_password(self, service: str, user: str, password: str) -> None:
-            self._store[(service, user)] = password
-
-        def get_password(self, service: str, user: str) -> str | None:
-            return self._store.get((service, user))
-
-    keyring = _MemoryKeyring()
 DEFAULT_CHANNELS = ["#general", "#status", "#alerts"]
 
 
@@ -63,7 +48,7 @@ class AgentChatConfig:
         identity_tbl = data.get("identity", {})
         if not identity_tbl:
             identity_tbl = {"nick": "", "realname": "Agent Chat"}
-        return cls(
+        config = cls(
             server=ServerConfig(
                 host=str(server_tbl.get("host", "127.0.0.1")),
                 port=int(server_tbl.get("port", 6697)),
@@ -74,6 +59,9 @@ class AgentChatConfig:
                 realname=str(identity_tbl.get("realname", "Agent Chat")),
             ),
         )
+        if not CONFIG_FILE.exists():
+            config.save()
+        return config
 
     def save(self) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -93,24 +81,36 @@ class AgentChatConfig:
             CONFIG_FILE.write_text(doc)
 
 
-def get_password(nick: str) -> str | None:
-    if not nick:
-        return None
-    return keyring.get_password(SERVICE_NAME, nick)
-
-
-def set_password(nick: str, password: str) -> None:
-    keyring.set_password(SERVICE_NAME, nick, password)
-
-
 def read_credentials_meta() -> Dict[str, Any]:
     if not CREDENTIALS_FILE.exists():
-        return {}
+        return {"passwords": {}}
     with CREDENTIALS_FILE.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    if "passwords" not in data:
+        data["passwords"] = {}
+    return data
 
 
-def write_credentials_meta(meta: Dict[str, Any]) -> None:
+def _write_credentials(meta: Dict[str, Any]) -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     with CREDENTIALS_FILE.open("w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
+
+
+def get_password(nick: str) -> str | None:
+    if not nick:
+        return None
+    meta = read_credentials_meta()
+    return meta.get("passwords", {}).get(nick)
+
+
+def set_password(nick: str, password: str) -> None:
+    meta = read_credentials_meta()
+    meta.setdefault("passwords", {})[nick] = password
+    _write_credentials(meta)
+
+
+def write_credentials_meta(update: Dict[str, Any]) -> None:
+    meta = read_credentials_meta()
+    meta.update({k: v for k, v in update.items() if k != "password"})
+    _write_credentials(meta)

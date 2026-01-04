@@ -12,7 +12,7 @@ from .client import run_with_client
 from .config import AgentChatConfig, set_password, write_credentials_meta
 from .logging import setup_logging, get_logger
 from .state import AgentChatState
-from .utils import generate_nick, is_channel
+from .utils import generate_nick, is_channel, is_direct
 
 app = typer.Typer(help="Agent Chat CLI")
 console = Console()
@@ -54,8 +54,10 @@ def send(target: str, message: str):
             state.touch_channel(target)
         else:
             pure = target[1:] if target.startswith("@") else target
+            dm_key = f"@{pure}"
+            state.ensure_direct(dm_key)
             await session.send_privmsg(pure, message)
-            state.touch_direct(f"@{pure}")
+            state.touch_direct(dm_key)
 
     run_with_client(config, action)
     console.print(f"Sent to {target}")
@@ -69,13 +71,24 @@ def listen(
 ):
     config = AgentChatConfig.load()
     state = AgentChatState.load()
-    channels = state.subscribed_channels if all else ([target] if target else [])
-    if not channels:
+    channel_targets: list[str] = []
+    direct_targets: list[str] = []
+    if all:
+        channel_targets = state.subscribed_channels
+    elif target:
+        if is_channel(target):
+            channel_targets = [target]
+        else:
+            pure = target[1:] if target.startswith("@") else target
+            dm_key = f"@{pure}"
+            state.ensure_direct(dm_key)
+            direct_targets = [dm_key]
+    else:
         console.print("No channel specified")
         raise typer.Exit(1)
 
     async def action(session):
-        for ch in channels:
+        for ch in channel_targets:
             entry = state.channels.get(ch)
             after = entry.msgid if entry else None
             messages = await session.fetch_history(ch, last, after)
@@ -88,6 +101,20 @@ def listen(
             console.print(table)
             if messages:
                 state.touch_channel(ch, messages[-1].msgid)
+        for dm_key in direct_targets:
+            nick = dm_key.lstrip("@")
+            entry = state.directs.get(dm_key)
+            after = entry.msgid if entry else None
+            messages = await session.fetch_history(nick, last, after)
+            table = Table(title=dm_key)
+            table.add_column("Time")
+            table.add_column("Nick")
+            table.add_column("Message")
+            for msg in messages:
+                table.add_row(msg.timestamp or "", msg.nick, msg.text)
+            console.print(table)
+            if messages:
+                state.touch_direct(dm_key, messages[-1].msgid)
 
     run_with_client(config, action)
 
@@ -107,7 +134,11 @@ def channels(subscribe: Optional[str] = typer.Option(None, "--subscribe")):
 
 @app.command("config")
 def config_cmd(
-    set_option: Optional[str] = typer.Option(None, "--set", help="key=value (server.host/port/identity.nick)"),
+    set_option: Optional[str] = typer.Option(
+        None,
+        "--set",
+        help="key=value (server.host/port/tls, identity.nick/realname)",
+    ),
 ):
     config = AgentChatConfig.load()
     if set_option:
@@ -119,8 +150,12 @@ def config_cmd(
             config.server.host = value
         elif key == "server.port":
             config.server.port = int(value)
+        elif key == "server.tls":
+            config.server.tls = value.lower() in {"1", "true", "yes", "on"}
         elif key == "identity.nick":
             config.identity.nick = value
+        elif key == "identity.realname":
+            config.identity.realname = value
         else:
             console.print(f"Unknown key: {key}")
             raise typer.Exit(1)
@@ -164,10 +199,13 @@ def login(nick: str, password: Optional[str] = typer.Option(None, help="Password
 
 
 @app.command()
-def notify(json_output: bool = typer.Option(False, "--json")):
+def notify(
+    json_output: bool = typer.Option(False, "--json"),
+    oneline: bool = typer.Option(False, "--oneline"),
+):
     config = AgentChatConfig.load()
     state = AgentChatState.load()
-    results = {}
+    results: dict[str, dict[str, object]] = {}
 
     async def action(session):
         for ch in state.subscribed_channels:
@@ -180,13 +218,32 @@ def notify(json_output: bool = typer.Option(False, "--json")):
                 "count": len(msgs),
                 "urgent": any(m.text.lower().startswith("!urgent") for m in msgs),
             }
+        for dm_key, entry in state.directs.items():
+            pure = dm_key.lstrip("@")
+            after = entry.msgid if entry else None
+            msgs = await session.fetch_history(pure, 20, after)
+            if msgs:
+                state.touch_direct(dm_key, msgs[-1].msgid)
+            results[dm_key] = {
+                "count": len(msgs),
+                "urgent": any(m.text.lower().startswith("!urgent") for m in msgs),
+            }
 
     run_with_client(config, action)
     if json_output:
         console.print(json.dumps(results))
-    else:
-        parts = [f"{ch}({data['count']}{'!' if data['urgent'] else ''})" for ch, data in results.items() if data["count"] > 0]
+    elif oneline:
+        parts = [
+            f"{key}({data['count']}{'!' if data['urgent'] else ''})"
+            for key, data in results.items()
+            if data["count"] > 0
+        ]
         console.print("[chat] " + " ".join(parts) if parts else "")
+    else:
+        for key, data in results.items():
+            count = data["count"]
+            urgent = " (URGENT)" if data["urgent"] else ""
+            console.print(f"{key}: {count} new messages{urgent}")
 
 @app.command()
 def who(channel: str = typer.Argument("#general")):

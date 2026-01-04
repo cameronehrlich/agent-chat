@@ -81,6 +81,8 @@ class AgentChatState:
         self.save()
 
     def touch_direct(self, target: str, msgid: Optional[str] = None) -> None:
+        if target not in self.directs:
+            self.directs[target] = LastSeenEntry()
         self.directs[target] = LastSeenEntry(timestamp=_now_iso(), msgid=msgid)
         self.save()
 
@@ -94,4 +96,11 @@ class AgentChatState:
     def remove_subscription(self, channel: str) -> None:
         if channel in self.subscribed_channels:
             self.subscribed_channels.remove(channel)
+            self.save()
+
+    def ensure_direct(self, target: str) -> None:
+        if not target.startswith("@"):
+            target = f"@{target}"
+        if target not in self.directs:
+            self.directs[target] = LastSeenEntry()
             self.save()

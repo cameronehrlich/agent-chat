@@ -489,11 +489,14 @@ The CLI auto-generates from bundled word lists (~100 adjectives × ~100 nouns = 
 ```json
 {
   "nick": "SwiftArrow",
-  "registered": true
+  "registered": true,
+  "passwords": {
+    "SwiftArrow": "generated-secure-password"
+  }
 }
 ```
 
-Actual passwords live in the OS keychain via the `keyring` library (e.g., macOS Keychain Access). The JSON file only tracks non-secret metadata (`nick`, flags). During login the CLI fetches the secret from keychain, and `ac register` stores it there.
+*Temporary note:* until keychain integration lands, passwords are stored locally in this file. The CLI will migrate secrets to macOS Keychain once that support is re-enabled.
 
 When `/listen #general` runs, update `last_seen.channels["#general"]` to now. Direct conversations (`/listen @BlueLake`) update `last_seen.direct["@BlueLake"]`, which drives the `@BlueLake(n)` counters shown in notifications.
 The CLI automatically adds `last_seen.direct` entries when it observes a new incoming `@Nick` message or you initiate a DM, and removes ones that have been idle for 30 days so the list reflects current conversations.
