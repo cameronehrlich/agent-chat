@@ -96,6 +96,9 @@ server:
                 cert: /etc/ergo/tls/fullchain.pem
                 key: /etc/ergo/tls/privkey.pem
 
+datastore:
+    path: /var/lib/ergo/ircd.db  # persistent storage for accounts + history
+
 network:
     name: AgentNet
 
@@ -606,8 +609,9 @@ fi
 TAILSCALE_IP=$(tailscale ip -4)
 echo "Tailscale IP: $TAILSCALE_IP"
 
-# 3. Create config directory
+# 3. Create config + data directories
 sudo mkdir -p /etc/ergo/tls
+sudo mkdir -p /var/lib/ergo
 
 # 4. Generate config
 cat > /tmp/ircd.yaml << EOF
@@ -619,6 +623,9 @@ server:
             tls:
                 cert: /etc/ergo/tls/fullchain.pem
                 key: /etc/ergo/tls/privkey.pem
+
+datastore:
+    path: /var/lib/ergo/ircd.db
 
 network:
     name: AgentNet

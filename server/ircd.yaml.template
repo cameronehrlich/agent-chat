@@ -1,0 +1,31 @@
+server:
+    name: agent-chat.local
+    listeners:
+        "100.x.x.x:6667": {}
+        "100.x.x.x:6697":
+            tls:
+                cert: /etc/ergo/tls/fullchain.pem
+                key: /etc/ergo/tls/privkey.pem
+network:
+    name: AgentNet
+accounts:
+    registration:
+        enabled: true
+        allow-before-connect: true
+    authentication-enabled: true
+    multiclient:
+        enabled: true
+        allowed-by-default: true
+        always-on: opt-in
+history:
+    enabled: true
+    channel-length: 4096
+    client-length: 512
+    chathistory-maxmessages: 1000
+    znc-maxmessages: 2048
+    restrictions:
+        expire-time: 168h
+channels:
+    default-modes: +nt
+    registration:
+        enabled: true

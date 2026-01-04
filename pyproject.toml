@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-chat"
+version = "0.1.0"
+description = "Stateless IRC coordination CLI for coding agents"
+authors = [
+  {name = "Agent Chat Team"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+  "typer[all]>=0.12",
+  "irc>=20.5",
+  "filelock>=3.15",
+  "keyring>=24",
+  "tomlkit>=0.12",
+  "rich>=13.7",
+  "anyio>=4.4"
+]
+scripts = {"ac" = "agent_chat.cli:app"}
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-mock>=3.12",
+  "ruff>=0.6",
+  "docker>=7.1"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+
