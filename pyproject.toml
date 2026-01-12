@@ -4,14 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-chat"
-version = "0.1.0"
-description = "Stateless Matrix coordination CLI for coding agents"
+version = "2.0.0"
+description = "Real-time coordination for AI coding agents via Matrix"
 authors = [
-  {name = "Agent Chat Team"}
+  {name = "Cameron Ehrlich", email = "cameron@startengine.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
+keywords = ["ai", "agents", "coordination", "matrix", "claude", "llm", "chat"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Communications :: Chat",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
   "typer[all]>=0.12",
   "matrix-nio>=0.24",
@@ -22,7 +35,14 @@ dependencies = [
   "rich>=13.7",
   "anyio>=4.4"
 ]
-scripts = {"ac" = "agent_chat.cli:app"}
+
+[project.scripts]
+ac = "agent_chat.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/cameronehrlich/agent-chat"
+Repository = "https://github.com/cameronehrlich/agent-chat"
+Issues = "https://github.com/cameronehrlich/agent-chat/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -30,11 +50,16 @@ dev = [
   "pytest-asyncio>=0.24",
   "pytest-mock>=3.12",
   "ruff>=0.6",
-  "docker>=7.1"
+  "docker>=7.1",
+  "build>=1.0",
+  "twine>=5.0"
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md", "*.json", "*.sh", "*.py"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

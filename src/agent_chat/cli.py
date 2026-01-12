@@ -1,9 +1,11 @@
 """Agent Chat CLI - Matrix-based coordination for coding agents."""
 from __future__ import annotations
 
-import asyncio
 import json
+import shutil
+import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -11,11 +13,11 @@ from rich.console import Console
 from rich.table import Table
 
 from .client import MatrixClient, get_client, run_sync
-from .config import AgentChatConfig, set_credentials, get_credentials
+from .config import AgentChatConfig, APP_DIR
 from .logging import setup_logging, get_logger
 from .presence import update_presence, get_presence, clear_stale
 from .state import AgentChatState
-from .utils import generate_nick, is_channel, is_direct
+from .utils import generate_nick, is_channel
 
 app = typer.Typer(help="Agent Chat CLI - Matrix coordination for coding agents")
 console = Console()
@@ -540,3 +542,222 @@ def presence_list(
         )
 
     console.print(table)
+
+
+def _find_package_root() -> Optional[Path]:
+    """Find the agent-chat package root directory."""
+    # Try to find from installed package
+    try:
+        import agent_chat
+        pkg_path = Path(agent_chat.__file__).parent.parent.parent
+        if (pkg_path / ".claude-plugin").exists():
+            return pkg_path
+    except Exception:
+        pass
+
+    # Check common dev locations
+    for candidate in [
+        Path.home() / "agent-chat",
+        Path.cwd(),
+        Path.cwd().parent,
+    ]:
+        if (candidate / ".claude-plugin" / "plugin.json").exists():
+            return candidate
+
+    return None
+
+
+@app.command()
+def setup(
+    server_url: Optional[str] = typer.Option(None, "--server", "-s", help="Matrix server URL"),
+    username: Optional[str] = typer.Option(None, "--username", "-u", help="Username"),
+    skip_docker: bool = typer.Option(False, "--skip-docker", help="Skip Docker setup prompt"),
+    skip_plugin: bool = typer.Option(False, "--skip-plugin", help="Skip Claude Code plugin setup"),
+):
+    """Interactive setup wizard for agent-chat.
+
+    Sets up:
+    - Configuration directory (~/.agent-chat/)
+    - Matrix homeserver connection
+    - User registration
+    - Claude Code plugin integration
+    """
+    console.print("\n[bold cyan]agent-chat setup[/bold cyan]\n")
+    console.print("Real-time coordination for AI coding agents.\n")
+
+    # Step 1: Create config directory
+    console.print("[dim]Step 1:[/dim] Creating config directory...")
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    console.print(f"  ✓ {APP_DIR}\n")
+
+    # Step 2: Matrix homeserver
+    console.print("[dim]Step 2:[/dim] Matrix homeserver configuration")
+
+    if not server_url:
+        # Check if Docker is available
+        docker_available = shutil.which("docker") is not None
+
+        if docker_available and not skip_docker:
+            # Check if a Matrix server is already running
+            try:
+                result = subprocess.run(
+                    ["docker", "ps", "--filter", "name=synapse", "--format", "{{.Names}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                synapse_running = "synapse" in result.stdout
+            except Exception:
+                synapse_running = False
+
+            if synapse_running:
+                console.print("  Found running Synapse container")
+                server_url = "http://localhost:8008"
+            else:
+                start_docker = typer.confirm(
+                    "  No Matrix server found. Start one with Docker?",
+                    default=True,
+                )
+                if start_docker:
+                    console.print("  Starting Synapse homeserver...")
+                    try:
+                        subprocess.run(
+                            [
+                                "docker", "run", "-d",
+                                "--name", "synapse",
+                                "-v", "synapse-data:/data",
+                                "-p", "8008:8008",
+                                "-e", "SYNAPSE_SERVER_NAME=localhost",
+                                "-e", "SYNAPSE_REPORT_STATS=no",
+                                "matrixdotorg/synapse:latest", "generate",
+                            ],
+                            check=True,
+                            capture_output=True,
+                        )
+                        # Wait a moment then start properly
+                        subprocess.run(
+                            ["docker", "start", "synapse"],
+                            check=True,
+                            capture_output=True,
+                        )
+                        console.print("  ✓ Synapse started on localhost:8008")
+                        server_url = "http://localhost:8008"
+                    except subprocess.CalledProcessError as e:
+                        console.print(f"  [yellow]Docker setup failed: {e}[/yellow]")
+                        server_url = typer.prompt(
+                            "  Enter Matrix server URL",
+                            default="http://localhost:8008",
+                        )
+                else:
+                    server_url = typer.prompt(
+                        "  Enter Matrix server URL",
+                        default="http://localhost:8008",
+                    )
+        else:
+            server_url = typer.prompt(
+                "  Enter Matrix server URL",
+                default="http://localhost:8008",
+            )
+
+    # Save server config
+    config = AgentChatConfig.load()
+    config.server.url = server_url
+    config.save()
+    console.print(f"  ✓ Server: {server_url}\n")
+
+    # Step 3: User registration
+    console.print("[dim]Step 3:[/dim] User registration")
+
+    if not username:
+        generated = generate_nick().lower()
+        username = typer.prompt("  Username", default=generated)
+
+    password = typer.prompt("  Password", hide_input=True)
+
+    client = _get_client()
+
+    async def do_register():
+        try:
+            result = await client.register(username, password)
+            return result
+        finally:
+            await client.close()
+
+    try:
+        result = run_sync(do_register())
+        config.identity.username = username
+        config.identity.display_name = username.title()
+        config.save()
+        console.print(f"  ✓ Registered as {result['user_id']}\n")
+    except Exception as e:
+        err_str = str(e).lower()
+        if "user_in_use" in err_str or "already" in err_str:
+            console.print(f"  Username '{username}' already exists. Trying login...")
+            try:
+                async def do_login():
+                    try:
+                        return await client.login(username, password)
+                    finally:
+                        await client.close()
+
+                result = run_sync(do_login())
+                config.identity.username = username
+                config.identity.display_name = username.title()
+                config.save()
+                console.print(f"  ✓ Logged in as {result['user_id']}\n")
+            except Exception as login_err:
+                console.print(f"  [red]Login failed: {login_err}[/red]")
+                raise typer.Exit(1)
+        else:
+            console.print(f"  [red]Registration failed: {e}[/red]")
+            raise typer.Exit(1)
+
+    # Step 4: Claude Code plugin
+    if not skip_plugin:
+        console.print("[dim]Step 4:[/dim] Claude Code plugin setup")
+
+        pkg_root = _find_package_root()
+        claude_dir = Path.home() / ".claude"
+        plugins_dir = claude_dir / "plugins"
+        plugin_link = plugins_dir / "agent-chat"
+
+        if pkg_root:
+            plugins_dir.mkdir(parents=True, exist_ok=True)
+
+            # Remove existing link if present
+            if plugin_link.exists() or plugin_link.is_symlink():
+                plugin_link.unlink()
+
+            # Create symlink
+            plugin_link.symlink_to(pkg_root)
+            console.print(f"  ✓ Plugin linked: {plugin_link} → {pkg_root}")
+
+            # Also link commands for easier access
+            commands_dir = claude_dir / "commands"
+            commands_dir.mkdir(parents=True, exist_ok=True)
+
+            for cmd_file in ["chat.md", "listen.md"]:
+                cmd_src = pkg_root / "commands" / cmd_file
+                cmd_dst = commands_dir / cmd_file
+                if cmd_src.exists():
+                    if cmd_dst.exists() or cmd_dst.is_symlink():
+                        cmd_dst.unlink()
+                    cmd_dst.symlink_to(cmd_src)
+                    console.print(f"  ✓ Command: /{cmd_file.replace('.md', '')}")
+
+            console.print()
+        else:
+            console.print("  [yellow]Could not find agent-chat package root[/yellow]")
+            console.print("  [dim]Plugin linking skipped. Install from source to enable.[/dim]\n")
+
+    # Done!
+    console.print("[bold green]Setup complete![/bold green]\n")
+    console.print("Quick start:")
+    console.print("  ac status          # Check connection")
+    console.print("  ac send '#general' 'Hello!'")
+    console.print("  ac listen '#general' --last 5")
+    console.print()
+    console.print("In Claude Code:")
+    console.print("  /chat '#general' 'Message from my agent'")
+    console.print("  /listen")
+    console.print()

@@ -1,12 +1,16 @@
-from agent_chat.config import AgentChatConfig, set_password, get_password
+from agent_chat.config import AgentChatConfig
 
 def test_config_roundtrip():
     cfg = AgentChatConfig.load()
-    cfg.server.host = "100.64.1.2"
-    cfg.identity.nick = "TestNick"
+    cfg.server.url = "http://100.64.1.2:8008"
+    cfg.identity.username = "testagent"
     cfg.save()
     reloaded = AgentChatConfig.load()
-    assert reloaded.server.host == "100.64.1.2"
-    assert reloaded.identity.nick == "TestNick"
-    set_password("TestNick", "secret")
-    assert get_password("TestNick") == "secret"
+    assert reloaded.server.url == "http://100.64.1.2:8008"
+    assert reloaded.identity.username == "testagent"
+
+def test_config_defaults():
+    cfg = AgentChatConfig.load()
+    # Should have sensible defaults
+    assert cfg.server.url is not None
+    assert cfg.identity.display_name is not None

@@ -25,18 +25,20 @@ agent-chat gives them a shared chat room. Agents announce when they start, coord
 ## Quick Start
 
 ```bash
-# Install
-pip install -e .
+pip install agent-chat
+ac setup
+```
 
-# Connect
-ac status
-# ✅ Connected as @greencastle
+That's it. The setup wizard will:
+- Start a Matrix homeserver (via Docker) or connect to an existing one
+- Register your agent identity
+- Install the Claude Code plugin
 
-# Say something
-ac send '#general' 'Hello from my agent'
-
-# See what others said
-ac listen '#general' --last 10
+Then:
+```bash
+ac status                           # ✓ Connected as @greencastle
+ac send '#general' 'Hello world'    # Send a message
+ac listen '#general' --last 5       # See recent messages
 ```
 
 ## Channels
@@ -64,7 +66,7 @@ ac send '@bluelake' '[HANDOFF] PR ready for review'
 
 ## Claude Code Integration
 
-agent-chat is a Claude Code plugin. Install it and agents automatically:
+agent-chat is a Claude Code plugin. After `ac setup`, agents automatically:
 
 1. **Announce presence** on session start
 2. **See notifications** before each tool use: `[chat] #general(2) #alerts(1!)`
@@ -108,15 +110,18 @@ ac presence-list
 
 Connect with any Matrix client (Element, etc.) on your phone or desktop. Watch agents coordinate in real-time. Jump in when needed.
 
-## Setup
+## Manual Setup
+
+If you prefer manual configuration over `ac setup`:
 
 ### 1. Run a Matrix homeserver
 
 ```bash
-# Docker example (Synapse)
 docker run -d --name synapse \
   -v synapse-data:/data \
   -p 8008:8008 \
+  -e SYNAPSE_SERVER_NAME=localhost \
+  -e SYNAPSE_REPORT_STATS=no \
   matrixdotorg/synapse:latest
 ```
 
@@ -140,11 +145,9 @@ ac register greencastle -p <password>
 
 ### 4. Install the plugin
 
-Symlink commands to your Claude Code config:
-
 ```bash
-ln -sf ~/agent-chat/commands/chat.md ~/.claude/commands/chat.md
-ln -sf ~/agent-chat/commands/listen.md ~/.claude/commands/listen.md
+mkdir -p ~/.claude/plugins
+ln -sf /path/to/agent-chat ~/.claude/plugins/agent-chat
 ```
 
 ## Multi-Machine Setup
@@ -177,6 +180,7 @@ Use `#work` for project coordination instead of the auto-detected channel.
 ## CLI Reference
 
 ```bash
+ac setup                               # Interactive setup wizard
 ac status                              # Check connection
 ac send '<target>' '<message>'         # Send message
 ac listen '<target>' --last N          # Read history

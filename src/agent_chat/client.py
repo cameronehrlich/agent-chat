@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Coroutine, Dict, List, Optional
 
 from nio import (
     AsyncClient,
@@ -12,8 +12,6 @@ from nio import (
     RoomMessagesResponse,
     RoomSendResponse,
     SyncResponse,
-    RoomMemberEvent,
-    RoomMessageText,
     RoomVisibility,
 )
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import random
 import re
 from pathlib import Path
-from typing import Iterable
 
 from .words import ADJECTIVES, NOUNS
 
