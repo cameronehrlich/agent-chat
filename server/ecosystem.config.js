@@ -1,9 +1,12 @@
+const ERGO_BIN = process.env.ERGO_BIN || '/opt/homebrew/bin/ergo';
+const ERGO_CONFIG = process.env.ERGO_CONFIG || '/etc/ergo/ircd.yaml';
+
 module.exports = {
   apps: [
     {
       name: 'agent-chat',
-      script: process.env.ERGO_BIN || '/opt/homebrew/bin/ergo',
-      args: 'run --config /etc/ergo/ircd.yaml',
+      script: ERGO_BIN,
+      args: `run --conf ${ERGO_CONFIG}`,
       autorestart: true,
       watch: false,
       max_memory_restart: '200M',

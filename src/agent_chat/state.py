@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 from filelock import FileLock
 
-from .config import APP_DIR, DEFAULT_CHANNELS
+from .config import APP_DIR, DEFAULT_ROOMS
 
 STATE_FILE = APP_DIR / "state.json"
 STATE_LOCK = STATE_FILE.with_suffix(".lock")
@@ -49,9 +49,9 @@ class AgentChatState:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         if not STATE_FILE.exists():
             state = cls(
-                channels={ch: LastSeenEntry() for ch in DEFAULT_CHANNELS},
+                channels={ch: LastSeenEntry() for ch in DEFAULT_ROOMS},
                 directs={},
-                subscribed_channels=DEFAULT_CHANNELS.copy(),
+                subscribed_channels=DEFAULT_ROOMS.copy(),
             )
             state.save()
             return state
@@ -62,7 +62,7 @@ class AgentChatState:
         directs_raw = last_seen.get("direct", {}) or last_seen.get("directs", {})
         channels = {name: LastSeenEntry.from_raw(val) for name, val in channels_raw.items()}
         directs = {name: LastSeenEntry.from_raw(val) for name, val in directs_raw.items()}
-        subs = data.get("subscribed_channels", DEFAULT_CHANNELS)
+        subs = data.get("subscribed_channels", DEFAULT_ROOMS)
         return cls(channels=channels, directs=directs, subscribed_channels=list(subs))
 
     def save(self) -> None:

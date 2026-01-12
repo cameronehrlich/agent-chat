@@ -26,10 +26,10 @@ if [[ -f "$CACHE_FILE" ]]; then
 fi
 
 NOTIFY=$(ac notify --json 2>/dev/null || echo "{}")
-python3 <<'PY' <<<"$NOTIFY" | tee "$CACHE_FILE" >/dev/null
-import json, sys
+NOTIFY="$NOTIFY" python3 <<'PY' | tee "$CACHE_FILE"
+import os, json
 try:
-    data=json.load(sys.stdin)
+    data=json.loads(os.environ.get("NOTIFY", "{}"))
 except Exception:
     print("")
     raise SystemExit

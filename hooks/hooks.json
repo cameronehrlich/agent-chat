@@ -1,0 +1,44 @@
+{
+  "hooks": [
+    {
+      "matcher": "PreToolUse",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
+          "timeout": 500
+        }
+      ]
+    },
+    {
+      "matcher": "SessionStart",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py",
+          "timeout": 5000
+        }
+      ]
+    },
+    {
+      "matcher": "UserPromptSubmit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/smart_interrupt.py",
+          "timeout": 5000
+        }
+      ]
+    },
+    {
+      "matcher": "Stop",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/stop_check_messages.py",
+          "timeout": 5000
+        }
+      ]
+    }
+  ]
+}

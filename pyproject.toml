@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-chat"
 version = "0.1.0"
-description = "Stateless IRC coordination CLI for coding agents"
+description = "Stateless Matrix coordination CLI for coding agents"
 authors = [
   {name = "Agent Chat Team"}
 ]
@@ -14,7 +14,8 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 dependencies = [
   "typer[all]>=0.12",
-  "irc>=20.5",
+  "matrix-nio>=0.24",
+  "aiohttp>=3.9",
   "filelock>=3.15",
   "keyring>=24",
   "tomlkit>=0.12",

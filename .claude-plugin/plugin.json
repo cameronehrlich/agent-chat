@@ -1,0 +1,5 @@
+{
+  "name": "agent-chat",
+  "version": "2.0.0",
+  "description": "Real-time coordination for coding agents via Matrix"
+}

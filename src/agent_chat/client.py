@@ -1,13 +1,23 @@
+"""Matrix client wrapper for agent-chat."""
 from __future__ import annotations
 
 import asyncio
-import ssl
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 
-from irc import client_aio, connection as irc_connection
+from nio import (
+    AsyncClient,
+    AsyncClientConfig,
+    LoginResponse,
+    RoomMessagesResponse,
+    RoomSendResponse,
+    SyncResponse,
+    RoomMemberEvent,
+    RoomMessageText,
+    RoomVisibility,
+)
 
-from .config import AgentChatConfig, get_password
+from .config import AgentChatConfig, get_credentials, set_credentials
 from .logging import get_logger
 
 log = get_logger(__name__)
@@ -15,217 +25,397 @@ log = get_logger(__name__)
 
 @dataclass
 class HistoryMessage:
-    channel: str
-    nick: str
+    """A message from room history."""
+    room_id: str
+    sender: str
     text: str
-    msgid: Optional[str]
-    timestamp: Optional[str]
+    event_id: Optional[str]
+    timestamp: Optional[int]
 
 
-def _tags_to_dict(tags) -> Dict[str, Optional[str]]:
-    data: Dict[str, Optional[str]] = {}
-    if not tags:
-        return data
-    for tag in tags:
-        key = tag.get("key") if isinstance(tag, dict) else tag[0]
-        value = tag.get("value") if isinstance(tag, dict) else tag[1]
-        data[key] = value
-    return data
+@dataclass
+class RoomMember:
+    """A member of a room."""
+    user_id: str
+    display_name: Optional[str]
 
 
-class AgentConnection(client_aio.AioConnection):
-    async def connect(
-        self,
-        server,
-        port,
-        nickname,
-        password=None,
-        username=None,
-        ircname=None,
-        connect_factory=irc_connection.AioFactory(),
-    ):
-        if self.connected:
-            self.disconnect("Changing servers")
+class MatrixClient:
+    """Stateless Matrix client for agent-chat operations."""
 
-        self.buffer = self.buffer_class()
-        self.handlers = {}
-        self.real_server_name = ""
-        self.real_nickname = nickname
-        self.server = server
-        self.port = port
-        self.server_address = (server, port)
-        self.nickname = nickname
-        self.username = username or nickname
-        self.ircname = ircname or nickname
-        self.password = password
-        self.connect_factory = connect_factory
-
-        protocol_instance = self.protocol_class(self, self.reactor.loop)
-        connection = self.connect_factory(protocol_instance, self.server_address)
-        transport, protocol = await connection
-
-        self.transport = transport
-        self.protocol = protocol
-        self.connected = True
-        self.reactor._on_connect(self.protocol, self.transport)
-
-        if self.password:
-            self.pass_(self.password)
-        caps = getattr(self, "requested_capabilities", [])
-        if caps:
-            self.cap("REQ", " ".join(caps))
-            self.cap("END")
-        self.nick(self.nickname)
-        self.user(self.username, self.ircname)
-        return self
-
-
-class AgentReactor(client_aio.AioReactor):
-    connection_class = AgentConnection
-
-
-class IRCSession(client_aio.AioSimpleIRCClient):
-    reactor_class = AgentReactor
-
-    def __init__(
-        self,
-        config: AgentChatConfig,
-        password: Optional[str],
-        on_ready: Callable[["IRCSession"], Awaitable[None]],
-    ) -> None:
+    def __init__(self, config: AgentChatConfig) -> None:
         self._config = config
-        self._password = password
-        self._on_ready = on_ready
-        self._loop = asyncio.new_event_loop()
-        self.loop = self._loop
-        self.loop = self._loop
-        self._completed: asyncio.Future[None] = self._loop.create_future()
-        try:
-            self._previous_loop = asyncio.get_event_loop()
-        except RuntimeError:
-            self._previous_loop = None
-        asyncio.set_event_loop(self._loop)
-        super().__init__()
-        if self._previous_loop is not None:
-            asyncio.set_event_loop(self._previous_loop)
-        self.connection.requested_capabilities = ["batch", "chathistory", "message-tags"]
-        self.connection.add_global_handler("disconnect", self._on_disconnect, -10)
-        self.connection.add_global_handler("all_events", self._log_events, -50)
+        self._client: Optional[AsyncClient] = None
 
-    def _log_events(self, connection, event):  # pragma: no cover - verbose tracing
-        log.debug("IRC event %s target=%s args=%s", event.type, event.target, event.arguments)
+    async def _get_client(self) -> AsyncClient:
+        """Get or create authenticated client."""
+        if self._client is not None:
+            return self._client
 
-    def _on_disconnect(self, connection, event):
-        if not self._completed.done():
-            self._completed.set_result(None)
-
-    async def _handle_ready(self):
-        await self._on_ready(self)
-        self.connection.quit("done")
-
-    def on_welcome(self, connection, event):
-        log.debug("welcome: %s", event)
-        asyncio.run_coroutine_threadsafe(self._handle_ready(), self._loop)
-
-    def connect_and_run(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        factory = irc_connection.AioFactory(ssl=self._config.server.tls)
-        log.info(
-            "Connecting to %s:%s as %s",
-            self._config.server.host,
-            self._config.server.port,
-            self._config.identity.nick,
+        client_config = AsyncClientConfig(
+            max_limit_exceeded=0,
+            max_timeouts=0,
         )
-        coro = self.connection.connect(
-            self._config.server.host,
-            self._config.server.port,
-            self._config.identity.nick,
-            password=self._password,
-            ircname=self._config.identity.realname,
-            connect_factory=factory,
+
+        self._client = AsyncClient(
+            homeserver=self._config.server.url,
+            user=f"@{self._config.identity.username}:{self._server_name}",
+            config=client_config,
         )
-        self._loop.run_until_complete(coro)
+
+        # Load stored credentials
+        creds = get_credentials()
+        if creds and creds.get("access_token"):
+            self._client.access_token = creds["access_token"]
+            self._client.user_id = creds["user_id"]
+            self._client.device_id = creds.get("device_id", "")
+            log.debug("Using stored credentials for %s", self._client.user_id)
+
+        return self._client
+
+    @property
+    def _server_name(self) -> str:
+        """Extract server name from URL."""
+        # For http://localhost:8008, we want agent-chat.local
+        # This should match what Synapse is configured with
+        return "agent-chat.local"
+
+    async def close(self) -> None:
+        """Close the client connection."""
+        if self._client:
+            await self._client.close()
+            self._client = None
+
+    async def register(self, username: str, password: str) -> Dict[str, Any]:
+        """Register a new user account."""
+        client = AsyncClient(
+            homeserver=self._config.server.url,
+            user="",
+        )
+
         try:
-            self._loop.run_until_complete(self._completed)
+            # Use the register endpoint directly
+            response = await client.register(
+                username=username,
+                password=password,
+            )
+
+            if hasattr(response, "access_token"):
+                set_credentials(
+                    user_id=response.user_id,
+                    access_token=response.access_token,
+                    device_id=response.device_id,
+                )
+                return {
+                    "user_id": response.user_id,
+                    "access_token": response.access_token,
+                    "device_id": response.device_id,
+                }
+            else:
+                raise RuntimeError(f"Registration failed: {response}")
         finally:
-            self._loop.run_until_complete(asyncio.sleep(0.1))
-            self._loop.stop()
-            self._loop.close()
+            await client.close()
 
-    async def send_privmsg(self, target: str, message: str) -> None:
-        self.connection.privmsg(target, message)
+    async def login(self, username: str, password: str) -> Dict[str, Any]:
+        """Login with username and password."""
+        client = AsyncClient(
+            homeserver=self._config.server.url,
+            user=f"@{username}:{self._server_name}",
+        )
 
-    async def join_channel(self, channel: str) -> None:
-        self.connection.join(channel)
+        try:
+            response = await client.login(password=password)
+
+            if isinstance(response, LoginResponse):
+                set_credentials(
+                    user_id=response.user_id,
+                    access_token=response.access_token,
+                    device_id=response.device_id,
+                )
+                return {
+                    "user_id": response.user_id,
+                    "access_token": response.access_token,
+                    "device_id": response.device_id,
+                }
+            else:
+                raise RuntimeError(f"Login failed: {response}")
+        finally:
+            await client.close()
+
+    async def check_status(self) -> Dict[str, Any]:
+        """Check connection status with a quick sync."""
+        client = await self._get_client()
+
+        try:
+            response = await client.sync(timeout=0, full_state=False)
+            if isinstance(response, SyncResponse):
+                return {
+                    "connected": True,
+                    "user_id": client.user_id,
+                    "rooms": len(response.rooms.join),
+                }
+            else:
+                return {"connected": False, "error": str(response)}
+        except Exception as e:
+            return {"connected": False, "error": str(e)}
+
+    async def resolve_room_alias(self, alias: str) -> Optional[str]:
+        """Resolve a room alias (#general) to room ID (!abc:server)."""
+        client = await self._get_client()
+
+        # Ensure proper format
+        if not alias.startswith("#"):
+            alias = f"#{alias}"
+        if ":" not in alias:
+            alias = f"{alias}:{self._server_name}"
+
+        try:
+            response = await client.room_resolve_alias(alias)
+            if hasattr(response, "room_id"):
+                return response.room_id
+            return None
+        except Exception as e:
+            log.warning("Failed to resolve alias %s: %s", alias, e)
+            return None
+
+    async def send_message(self, target: str, message: str) -> bool:
+        """Send a message to a room or user."""
+        client = await self._get_client()
+
+        # Resolve target to room ID
+        room_id = target
+        if target.startswith("#"):
+            resolved = await self.resolve_room_alias(target)
+            if resolved:
+                room_id = resolved
+            else:
+                raise ValueError(f"Could not resolve room alias: {target}")
+        elif target.startswith("@"):
+            # Direct message - need to find or create DM room
+            room_id = await self._get_or_create_dm_room(target)
+
+        # Ensure we're in the room
+        await client.join(room_id)
+
+        response = await client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content={
+                "msgtype": "m.text",
+                "body": message,
+            },
+        )
+
+        if isinstance(response, RoomSendResponse):
+            log.debug("Sent message to %s: %s", room_id, response.event_id)
+            return True
+        else:
+            log.error("Failed to send message: %s", response)
+            return False
+
+    async def _get_or_create_dm_room(self, user_id: str) -> str:
+        """Get or create a DM room with a user."""
+        client = await self._get_client()
+
+        # Ensure proper format
+        if not user_id.startswith("@"):
+            user_id = f"@{user_id}"
+        if ":" not in user_id:
+            user_id = f"{user_id}:{self._server_name}"
+
+        # Check existing rooms for DM with this user
+        response = await client.sync(timeout=0, full_state=True)
+        if isinstance(response, SyncResponse):
+            for room_id, room in response.rooms.join.items():
+                # Check room state for direct message with target user
+                try:
+                    state_response = await client.room_get_state(room_id)
+                    if hasattr(state_response, "events"):
+                        for event in state_response.events:
+                            # Look for m.room.member event for target user with is_direct
+                            if (event.get("type") == "m.room.member" and
+                                event.get("state_key") == user_id and
+                                event.get("content", {}).get("is_direct")):
+                                log.debug("Found existing DM room %s with %s", room_id, user_id)
+                                return room_id
+                except Exception as e:
+                    log.debug("Could not check state for %s: %s", room_id, e)
+
+        # Create new DM room
+        log.debug("Creating new DM room with %s", user_id)
+        room_response = await client.room_create(
+            is_direct=True,
+            invite=[user_id],
+        )
+
+        if hasattr(room_response, "room_id"):
+            return room_response.room_id
+        else:
+            raise RuntimeError(f"Failed to create DM room: {room_response}")
 
     async def fetch_history(
         self,
-        channel: str,
-        limit: int,
-        after_msgid: Optional[str] = None,
+        target: str,
+        limit: int = 20,
     ) -> List[HistoryMessage]:
-        future: asyncio.Future[List[HistoryMessage]] = self._loop.create_future()
-        pending: Dict[str, List[HistoryMessage]] = {"messages": []}
-        target_batch: Dict[str, Optional[str]] = {"id": None}
+        """Fetch message history from a room or DM."""
+        client = await self._get_client()
 
-        def on_batch(connection, event):
-            args = event.arguments or []
-            token = args[0] if args else ""
-            if token.startswith("+"):
-                if len(args) >= 3 and args[1] == "chathistory" and args[2] == channel:
-                    target_batch["id"] = token[1:]
-            elif token.startswith("-"):
-                if target_batch.get("id") and token[1:] == target_batch["id"]:
-                    self.connection.remove_global_handler("batch", on_batch)
-                    self.connection.remove_global_handler("privmsg", on_privmsg)
-                    if not future.done():
-                        future.set_result(pending["messages"])
+        # Resolve target to room ID
+        room_id = target
+        if target.startswith("#"):
+            resolved = await self.resolve_room_alias(target)
+            if resolved:
+                room_id = resolved
+            else:
+                return []
+        elif target.startswith("@"):
+            # DM target - find the DM room
+            try:
+                room_id = await self._get_or_create_dm_room(target)
+            except Exception as e:
+                log.warning("Could not get DM room for %s: %s", target, e)
+                return []
 
-        def on_privmsg(connection, event):
-            tags = _tags_to_dict(event.tags)
-            batch_id = tags.get("batch")
-            if not target_batch.get("id") or batch_id != target_batch["id"]:
-                return
-            pending["messages"].append(
-                HistoryMessage(
-                    channel=event.target,
-                    nick=getattr(event.source, "nick", str(event.source)),
-                    text=event.arguments[0] if event.arguments else "",
-                    msgid=tags.get("msgid"),
-                    timestamp=tags.get("time"),
-                )
-            )
-
-        self.connection.add_global_handler("batch", on_batch, 10)
-        self.connection.add_global_handler("privmsg", on_privmsg, 10)
-
-        if after_msgid:
-            command = f"CHATHISTORY AFTER {channel} {after_msgid} {limit}"
-        else:
-            command = f"CHATHISTORY LATEST {channel} * {limit}"
-        log.debug("Issuing %s", command)
-        self.connection.send_raw(command)
-
+        # Ensure we're in the room
         try:
-            return await asyncio.wait_for(future, timeout=10)
-        except asyncio.TimeoutError:
-            log.warning("CHATHISTORY timeout for %s", channel)
-            return []
-        finally:
-            try:
-                self.connection.remove_global_handler("batch", on_batch)
-            except ValueError:
-                pass
-            try:
-                self.connection.remove_global_handler("privmsg", on_privmsg)
-            except ValueError:
-                pass
+            await client.join(room_id)
+        except Exception as e:
+            log.warning("Failed to join room %s: %s", room_id, e)
+
+        response = await client.room_messages(
+            room_id=room_id,
+            start="",  # Start from latest
+            limit=limit,
+        )
+
+        messages: List[HistoryMessage] = []
+        if isinstance(response, RoomMessagesResponse):
+            for event in response.chunk:
+                if hasattr(event, "body"):
+                    messages.append(
+                        HistoryMessage(
+                            room_id=room_id,
+                            sender=event.sender,
+                            text=event.body,
+                            event_id=event.event_id,
+                            timestamp=event.server_timestamp,
+                        )
+                    )
+
+        # Return in chronological order (oldest first)
+        messages.reverse()
+        return messages
+
+    async def get_joined_rooms(self) -> List[Dict[str, Any]]:
+        """Get list of joined rooms with metadata."""
+        client = await self._get_client()
+
+        response = await client.sync(timeout=0, full_state=False)
+        rooms = []
+
+        if isinstance(response, SyncResponse):
+            for room_id in response.rooms.join:
+                rooms.append({
+                    "room_id": room_id,
+                    "name": room_id,  # Could fetch room state for name
+                })
+
+        return rooms
+
+    async def get_room_members(self, target: str) -> List[RoomMember]:
+        """Get members of a room."""
+        client = await self._get_client()
+
+        # Resolve target to room ID
+        room_id = target
+        if target.startswith("#"):
+            resolved = await self.resolve_room_alias(target)
+            if resolved:
+                room_id = resolved
+            else:
+                return []
+
+        response = await client.joined_members(room_id)
+        members = []
+
+        if hasattr(response, "members"):
+            for member in response.members:
+                members.append(
+                    RoomMember(
+                        user_id=member.user_id,
+                        display_name=member.display_name,
+                    )
+                )
+
+        return members
+
+    async def create_room(
+        self,
+        alias: str,
+        public: bool = True,
+        topic: str = "",
+    ) -> Optional[str]:
+        """Create a new room with an alias."""
+        client = await self._get_client()
+
+        # Clean up alias
+        local_alias = alias.lstrip("#").split(":")[0]
+
+        response = await client.room_create(
+            alias=local_alias,
+            visibility=RoomVisibility.public if public else RoomVisibility.private,
+            topic=topic,
+        )
+
+        if hasattr(response, "room_id"):
+            log.info("Created room %s with alias #%s", response.room_id, local_alias)
+            return response.room_id
+        else:
+            log.error("Failed to create room: %s", response)
+            return None
+
+    async def join_or_create_room(
+        self,
+        alias: str,
+        topic: str = "",
+    ) -> Optional[str]:
+        """Join a room by alias, creating it if it doesn't exist."""
+        client = await self._get_client()
+
+        # Clean up alias
+        if not alias.startswith("#"):
+            alias = f"#{alias}"
+
+        # Try to resolve existing room
+        room_id = await self.resolve_room_alias(alias)
+        if room_id:
+            # Room exists, join it
+            await client.join(room_id)
+            log.info("Joined existing room %s (%s)", alias, room_id)
+            return room_id
+
+        # Room doesn't exist, create it
+        log.info("Room %s doesn't exist, creating...", alias)
+        room_id = await self.create_room(alias, public=True, topic=topic)
+        if room_id:
+            await client.join(room_id)
+            return room_id
+
+        return None
 
 
-def run_with_client(
-    config: AgentChatConfig,
-    on_ready: Callable[[IRCSession], Awaitable[None]],
-) -> None:
-    password = get_password(config.identity.nick)
-    session = IRCSession(config=config, password=password, on_ready=on_ready)
-    session.connect_and_run()
+def run_sync(coro: Coroutine) -> Any:
+    """Run an async coroutine synchronously."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    return loop.run_until_complete(coro)
+
+
+def get_client(config: AgentChatConfig) -> MatrixClient:
+    """Create a new Matrix client instance."""
+    return MatrixClient(config)

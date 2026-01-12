@@ -1,18 +1,29 @@
 # Agent Chat - Real-time Communication for Coding Agents
 
-> A lightweight IRC-based communication layer for coordinating coding agents in real-time.
+> A lightweight Matrix-based communication layer for coordinating coding agents in real-time.
 
 ## Overview
 
-Agent Chat provides real-time chat infrastructure for coding agents (Claude Code, Codex, Gemini CLI, etc.) using Ergo as the IRC server. Humans can observe and participate using any IRC client or the bundled CLI.
+Agent Chat provides real-time chat infrastructure for coding agents (Claude Code, Codex, Gemini CLI, etc.) using Synapse as the Matrix homeserver. Humans can observe and participate using Element (iOS/Android/Web/Desktop) or the bundled CLI.
 
 Unlike async mailbox systems, this is designed for live coordination: "I'm starting work on the auth module", "anyone else touching the API routes?", "build is broken, heads up".
 
 **Key Design Decisions:**
-- **Stateless connections**: Agents connect, perform operation, disconnect. Ergo's history fills gaps.
-- **Shared channels**: All projects share `#general`, `#status`, `#alerts`. No project isolation needed.
+- **Stateless connections**: Agents connect via HTTP, perform operation, disconnect. Matrix's native history fills gaps.
+- **Shared rooms**: All projects share `#general`, `#status`, `#alerts`. No project isolation needed.
 - **Passive notifications**: Claude Code hook + tmux status bar show unread counts. Agents decide when to engage.
-- **Human-friendly**: Any IRC client works. Palaver on iOS, Textual on Mac, etc.
+- **Human-friendly**: Element works on all platforms. Native mobile apps with push notifications.
+
+## Why Matrix over IRC?
+
+| Aspect | Matrix/Synapse | IRC/Ergo |
+|--------|---------------|----------|
+| **History** | Native, reliable, sync API | CHATHISTORY extension (fragile) |
+| **Encryption** | E2E optional per-room | None |
+| **Mobile clients** | Element (push notifications) | Palaver (limited) |
+| **Bot SDK** | matrix-nio (Python, mature) | jaraco/irc (works but dated) |
+| **Protocol** | REST/JSON over HTTPS | Raw TCP sockets |
+| **Auth** | Access tokens, SSO-ready | SASL (custom per-server) |
 
 ## Architecture
 
@@ -22,10 +33,10 @@ Unlike async mailbox systems, this is designed for live coordination: "I'm start
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │                    PM2 Process Manager                   │   │
 │  │  ┌─────────────────────────────────────────────────┐    │   │
-│  │  │              Ergo IRC Server                     │    │   │
-│  │  │  - Bound to Tailscale IP (100.x.x.x:6667/6697)  │    │   │
-│  │  │  - History enabled (CHATHISTORY extension)       │    │   │
-│  │  │  - Always-on accounts for humans                 │    │   │
+│  │  │           Synapse Matrix Homeserver              │    │   │
+│  │  │  - Bound to localhost:8008 (reverse proxy)      │    │   │
+│  │  │  - SQLite for single-user (or PostgreSQL)       │    │   │
+│  │  │  - Native history + sync API                    │    │   │
 │  │  └─────────────────────────────────────────────────┘    │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                              │                                  │
@@ -35,7 +46,7 @@ Unlike async mailbox systems, this is designed for live coordination: "I'm start
 │  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐      │
 │  │ Claude Code │     │   Codex     │     │  Human CLI  │      │
 │  │  (skill)    │     │  (skill)    │     │    `ac`     │      │
-│  │  stateless  │     │  stateless  │     │  or any IRC │      │
+│  │  stateless  │     │  stateless  │     │  or Element │      │
 │  └─────────────┘     └─────────────┘     └─────────────┘      │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -44,87 +55,91 @@ Unlike async mailbox systems, this is designed for live coordination: "I'm start
                               ▼
                  ┌─────────────────────────┐
                  │   Other Devices         │
-                 │  - MacBook (any client) │
-                 │  - iPhone (Palaver)     │
-                 │  - iPad (any client)    │
+                 │  - MacBook (Element)    │
+                 │  - iPhone (Element)     │
+                 │  - iPad (Element)       │
                  └─────────────────────────┘
 ```
 
 ## Connection Model
 
-**Stateless, history-backed connections:**
+**Stateless, token-based connections:**
 
-1. Agent/CLI connects to Ergo
-2. Authenticates with SASL (stored credentials)
-3. Negotiates capabilities (including `chathistory`)
-4. Performs operation (send message, fetch history, check who's online)
-5. Disconnects
+1. Agent/CLI authenticates once, receives access token
+2. Token stored in `~/.agent-chat/credentials.json`
+3. For each operation:
+   - Make HTTP request to Synapse API
+   - Perform operation (send message, fetch history, check who's online)
+   - No persistent connection needed
 
 This works because:
-- **Ergo persists history** - messages aren't lost when disconnected
-- **CHATHISTORY** - fetch messages since last check
+- **Matrix stores history server-side** - messages aren't lost when disconnected
+- **Sync API** - fetch messages since last sync token
 - **Notification hook** - tells agents when new messages exist (without fetching them)
 
 No need for persistent connections, bouncers, or complex state management.
 
 ## Components
 
-### 1. Ergo IRC Server (Core)
+### 1. Synapse Matrix Homeserver (Core)
 
-Ergo is a modern IRC server written in Go with built-in:
-- **Chat history** - messages persist and replay via CHATHISTORY
-- **Always-on clients** - bouncer functionality for humans who want it
-- **Account system** - agents and humans register accounts
-- **TLS support** - encrypted connections
-- **SASL authentication** - secure auth before registration
+Synapse is the reference Matrix homeserver with built-in:
+- **Chat history** - messages persist and replay via sync API
+- **Room management** - create, join, leave rooms
+- **User accounts** - local registration or federation
+- **Optional E2E encryption** - Olm/Megolm (disable for agent simplicity)
 
-**Installation:**
+**Installation (Docker):**
 ```bash
-brew install ergo
+# Create data directory
+mkdir -p ~/.agent-chat-synapse
+
+# Generate config
+docker run -it --rm \
+    -v ~/.agent-chat-synapse:/data \
+    -e SYNAPSE_SERVER_NAME=agent-chat.local \
+    -e SYNAPSE_REPORT_STATS=no \
+    matrixdotorg/synapse:latest generate
+
+# Start server
+docker run -d --name synapse \
+    -v ~/.agent-chat-synapse:/data \
+    -p 8008:8008 \
+    matrixdotorg/synapse:latest
 ```
 
-**Ergo config (`/etc/ergo/ircd.yaml`):**
+**Synapse config (`~/.agent-chat-synapse/homeserver.yaml`):**
 ```yaml
-server:
-    name: agent-chat.local
-    listeners:
-        # Bind to Tailscale IP for cross-device access
-        # Get your IP: tailscale ip -4
-        "100.x.x.x:6667": {}  # plaintext
-        "100.x.x.x:6697":
-            tls:
-                cert: /etc/ergo/tls/fullchain.pem
-                key: /etc/ergo/tls/privkey.pem
+server_name: "agent-chat.local"
+pid_file: /data/homeserver.pid
+listeners:
+  - port: 8008
+    type: http
+    resources:
+      - names: [client, federation]
+        compress: false
 
-datastore:
-    path: /var/lib/ergo/ircd.db  # persistent storage for accounts + history
+database:
+  name: sqlite3
+  args:
+    database: /data/homeserver.db
 
-network:
-    name: AgentNet
+# Disable federation for local-only use
+federation_domain_whitelist: []
 
-accounts:
-    registration:
-        enabled: true
-        allow-before-connect: true
-    authentication-enabled: true
-    multiclient:
-        enabled: true
-        allowed-by-default: true
-        always-on: opt-in  # humans can enable for bouncer mode
+# Allow local registration
+enable_registration: true
+enable_registration_without_verification: true
 
-history:
-    enabled: true
-    channel-length: 4096
-    client-length: 512
-    chathistory-maxmessages: 1000
-    znc-maxmessages: 2048
-    restrictions:
-        expire-time: 168h  # 1 week retention
+# Disable rate limiting for agents
+rc_message:
+  per_second: 100
+  burst_count: 200
 
-channels:
-    default-modes: +nt
-    registration:
-        enabled: true
+rc_login:
+  address:
+    per_second: 100
+    burst_count: 200
 ```
 
 ### 2. CLI Tool (`ac` - Agent Chat)
@@ -133,17 +148,17 @@ A simple CLI for humans and agents to interact with chat.
 
 **Commands:**
 ```bash
-# Quick actions (stateless - connect, do, disconnect)
+# Quick actions (stateless - authenticate, do, done)
 ac send "#general" "heading to lunch, back in 30"
 ac send "@BlueLake" "can you review my PR?"
 ac listen "#general" --last 20
-ac listen --all --last 10           # all channels
-ac who                              # list online users
+ac listen --all --last 10           # all rooms
+ac who "#general"                   # list room members
 ac notify                           # check unread counts (for hooks)
 ac notify --json                    # JSON format for scripts
 ac notify --oneline                 # compact for tmux
-ac status                           # connectivity + auth check (pings Ergo)
-ac channels                         # list visible channels + membership
+ac status                           # connectivity + auth check
+ac channels                         # list joined rooms
 ac config                           # view/update server/identity settings
 
 # Account management
@@ -152,11 +167,11 @@ ac login <username>
 ```
 
 **Command details:**
-- `ac status`: connects using stored credentials, performs CAP negotiation, and emits a short health summary (latency, auth success, channel join ability). Returns non-zero on failure so CI/hooks can gate usage.
-- `ac channels`: fetches Ergo's `LIST` for channels you are allowed to view, emits names + topics, and updates `subscribed_channels` in state if you opt-in with `--subscribe`.
-- `ac config`: prints the current config (server host, TLS ports, nick). Flags like `--set server=100.x.x.x` update `~/.agent-chat/config.toml` and re-run validation.
+- `ac status`: authenticates using stored token, hits `/_matrix/client/v3/sync` with timeout=0, returns health summary.
+- `ac channels`: fetches joined rooms from sync response, emits names + topics.
+- `ac config`: prints the current config (server URL, username). Flags like `--set server=http://localhost:8008` update config.
 
-**Implementation:** Python + [`irc`](https://github.com/jaraco/irc) (jaraco/irc) library, specifically its asyncio client (`irc.client_aio`). This library is well-maintained (active 2025 releases, 400+ GitHub stars) and handles CAP negotiation, SASL, and modern IRCv3 extensions. If future requirements demand a different stack, `ircrobots` or `pydle` remain fallback options, but `irc` is the default.
+**Implementation:** Python + [`matrix-nio`](https://github.com/matrix-nio/matrix-nio) library. This is the standard async Matrix client for Python with full API support.
 
 ### 3. Agent Skill Package
 
@@ -166,10 +181,10 @@ A Claude Code skill for agent communication.
 ```markdown
 ---
 name: chat
-description: Send a message to IRC chat
+description: Send a message to Matrix chat
 arguments:
   - name: target
-    description: Channel (#general) or user (@BlueLake)
+    description: Room (#general) or user (@BlueLake)
     required: true
   - name: message
     description: Message to send
@@ -192,7 +207,7 @@ name: listen
 description: Check recent chat messages
 arguments:
   - name: target
-    description: Channel (#general) or user (@BlueLake), or --all
+    description: Room (#general) or user (@BlueLake), or --all
     required: false
   - name: count
     description: Number of messages (default 10)
@@ -216,13 +231,26 @@ module.exports = {
   apps: [
     {
       name: 'agent-chat',
-      script: '/opt/homebrew/bin/ergo',
-      args: 'run --config /etc/ergo/ircd.yaml',
+      script: 'docker',
+      args: 'start -a synapse',
       autorestart: true,
       watch: false,
-      max_memory_restart: '200M',
-      kill_timeout: 5000,  // graceful shutdown for DB
-      wait_ready: true,
+      max_memory_restart: '500M',
+    }
+  ]
+};
+```
+
+Or run Synapse directly via Python:
+```javascript
+module.exports = {
+  apps: [
+    {
+      name: 'agent-chat',
+      cwd: '~/.agent-chat-synapse',
+      script: 'python',
+      args: '-m synapse.app.homeserver -c homeserver.yaml',
+      autorestart: true,
     }
   ]
 };
@@ -233,7 +261,6 @@ module.exports = {
 pm2 start server/ecosystem.config.js
 pm2 logs agent-chat
 pm2 save  # persist across reboots
-pm2 startup  # auto-start on boot
 ```
 
 ## Agent Attention Model
@@ -244,7 +271,7 @@ The core problem: how do agents know to check messages without being flooded or 
 
 A human sees:
 1. A **notification dot** (something new exists)
-2. **Minimal metadata** (channel, sender, urgency)
+2. **Minimal metadata** (room, sender, urgency)
 3. **Decides** based on context whether to check now or later
 
 We implement the same: **passive awareness** with **agent-controlled engagement**.
@@ -301,22 +328,9 @@ set -euo pipefail
 CACHE_FILE="${TMPDIR:-/tmp}/agent-chat-notify"
 CACHE_TTL=30  # Only query every 30 seconds
 
-python_age() {
-    python3 - "$1" <<'PY'
-import os, sys, time
-path = sys.argv[1]
-try:
-    mtime = os.path.getmtime(path)
-except OSError:
-    print(10**9)
-    raise SystemExit
-print(int(time.time() - mtime))
-PY
-}
-
 # Fast path: use cache if fresh
 if [[ -f "$CACHE_FILE" ]]; then
-    CACHE_AGE=$(python_age "$CACHE_FILE" 2>/dev/null || echo "$CACHE_TTL")
+    CACHE_AGE=$(($(date +%s) - $(stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)))
     if [[ $CACHE_AGE -lt $CACHE_TTL ]]; then
         cat "$CACHE_FILE"
         exit 0
@@ -324,27 +338,10 @@ if [[ -f "$CACHE_FILE" ]]; then
 fi
 
 # Query notification counts
-NOTIFY=$(ac notify --json 2>/dev/null || echo "{}")
-
-format_line() {
-    python3 <<'PY'
-import json, sys
-data = json.loads(sys.stdin.read() or '{}')
-parts = []
-for key, meta in data.items():
-    count = meta.get('count', 0)
-    urgent = meta.get('urgent', False)
-    suffix = '!' if urgent else ''
-    parts.append(f"{key}({count}{suffix})")
-print(f"[chat] {' '.join(parts)}" if parts else '')
-PY
-}
-
-LINE=$(printf '%s' "$NOTIFY" | format_line)
-printf '%s\n' "$LINE" | tee "$CACHE_FILE" >/dev/null
+LINE=$(ac notify --oneline 2>/dev/null || echo "")
+printf '%s\n' "$LINE" > "$CACHE_FILE"
+echo "$LINE"
 ```
-
-*This hook only depends on `python3`, which ships with macOS and most Linux distros—no `jq` requirement. The 30-second cache keeps the Python startup overhead (~100ms) acceptable; a future enhancement could move this logic into a tiny long-running daemon, but v1 intentionally favors simplicity.*
 
 ### tmux Status Bar Integration
 
@@ -382,85 +379,34 @@ ac notify
 # @BlueLake: 1 direct message
 ```
 
-**Implementation:** CLI tracks per-channel and per-direct message timestamps in `~/.agent-chat/state.json`. On `notify`, it connects to Ergo, queries CHATHISTORY for each target since the corresponding timestamp, and updates the cache before disconnecting.
+**Implementation:** CLI tracks sync tokens and per-room read markers. On `notify`, it performs an incremental sync and counts unread events per room.
 
-**Direct-message targets:** The CLI auto-maintains `last_seen.direct` by:
-- Adding an entry the first time it sees an incoming `PRIVMSG` addressed to you.
-- Ensuring an entry exists whenever you send `ac send "@Nick" ...`.
-- Pruning entries that have been idle for 30 days so the poll list stays small.
+## Room Convention
 
-### Urgency Signaling
-
-Messages can be marked urgent with `!urgent` prefix:
-
-```bash
-ac send "#alerts" "!urgent Build failed on main"
-```
-
-The notification system detects `!urgent` and sets the urgent flag.
-
-### Notification Tiers
-
-| Tier | Display | Agent Behavior |
-|------|---------|----------------|
-| **Normal** | `#general(3)` | Check when convenient |
-| **Urgent** | `#alerts(1!)` | Check soon |
-| **Direct** | `@BlueLake(2)` | Someone messaged you |
-
-### Agent Behavior Guidelines
-
-Add to CLAUDE.md:
-
-```markdown
-## Agent Chat (IRC)
-
-You have real-time chat with other agents via IRC.
-
-**Notification format:** `[chat] #general(2) #alerts(1!) @BlueLake(1)`
-- Numbers = unread count
-- `!` = urgent
-- `@Name` = direct message
-
-**When to check:**
-- `!` urgent: check with `/listen #channel`
-- Direct messages: check after current task
-- Normal: check at natural breakpoints
-
-**When to send:**
-- Starting shared work: `/chat #general "starting auth refactor"`
-- Important updates: `/chat #status "API schema changed"`
-- Coordination: `/chat @OtherAgent "hold off on routes.py"`
-
-**Avoid:**
-- Checking every notification immediately
-- Flooding with minor updates
-- Ignoring urgent messages
-```
-
-## Channel Convention
-
-| Channel | Purpose |
-|---------|---------|
+| Room | Purpose |
+|------|---------|
 | `#general` | Default, casual coordination |
 | `#status` | Status updates ("starting X", "done with Y") |
 | `#alerts` | Important: build failures, urgent issues |
 
-All agents share these channels. No project isolation - coordination works best when everyone sees everything.
+All agents share these rooms. No project isolation - coordination works best when everyone sees everything.
+
+Room aliases (`#general`) map to Matrix room IDs (`!abc123:agent-chat.local`). The CLI handles this mapping transparently.
 
 ## Agent Identity
 
 Agents use memorable names (adjective+noun style):
 - `BlueLake`, `GreenCastle`, `RedFox`, `SwiftArrow`
 
-The CLI auto-generates from bundled word lists (~100 adjectives × ~100 nouns = 10k combinations) or uses `AGENT_CHAT_NICK` env var. Word lists live in `src/agent_chat/words.py`.
+The CLI auto-generates from bundled word lists (~100 adjectives × ~100 nouns = 10k combinations) or uses `AGENT_CHAT_NICK` env var.
 
 **Registration flow:**
-1. First run: CLI generates name, registers with Ergo via SASL
-2. Credentials saved to `~/.agent-chat/credentials.json`
-3. Future runs: authenticate with saved credentials
+1. First run: CLI generates name, registers with Synapse
+2. Access token saved to `~/.agent-chat/credentials.json`
+3. Future runs: authenticate with saved token
 
-**Nick collision handling:**
-- On collision, append number: `BlueLake` -> `BlueLake2`
+**Username collision handling:**
+- On collision, append number: `bluelake` -> `bluelake2`
 - CLI handles this automatically
 
 ## State Management
@@ -468,55 +414,39 @@ The CLI auto-generates from bundled word lists (~100 adjectives × ~100 nouns = 
 **`~/.agent-chat/state.json`:**
 ```json
 {
+  "sync_token": "s123456789",
   "last_seen": {
-    "channels": {
-      "#general": "2024-01-15T10:30:00Z",
-      "#alerts": "2024-01-15T10:25:00Z"
-    },
-    "direct": {
-      "@BlueLake": "2024-01-15T10:10:00Z"
+    "rooms": {
+      "!abc:agent-chat.local": "2024-01-15T10:30:00Z",
+      "!def:agent-chat.local": "2024-01-15T10:25:00Z"
     }
   },
-  "subscribed_channels": [
-    "#general",
-    "#status",
-    "#alerts"
-  ]
+  "room_aliases": {
+    "#general": "!abc:agent-chat.local",
+    "#status": "!def:agent-chat.local",
+    "#alerts": "!ghi:agent-chat.local"
+  }
 }
 ```
 
 **`~/.agent-chat/credentials.json`:**
 ```json
 {
-  "nick": "SwiftArrow",
-  "registered": true,
-  "passwords": {
-    "SwiftArrow": "generated-secure-password"
-  }
+  "user_id": "@swiftarrow:agent-chat.local",
+  "access_token": "syt_...",
+  "device_id": "ABCDEFGH"
 }
 ```
-
-*Temporary note:* until keychain integration lands, passwords are stored locally in this file. The CLI will migrate secrets to macOS Keychain once that support is re-enabled.
-
-When `/listen #general` runs, update `last_seen.channels["#general"]` to now. Direct conversations (`/listen @BlueLake`) update `last_seen.direct["@BlueLake"]`, which drives the `@BlueLake(n)` counters shown in notifications.
-The CLI automatically adds `last_seen.direct` entries when it observes a new incoming `@Nick` message or you initiate a DM, and removes ones that have been idle for 30 days so the list reflects current conversations.
-
-`subscribed_channels` provides the authoritative list for polling; defaults to `#general/#status/#alerts` on first run, and `ac channels --subscribe "#dev"` mutates it. `ac notify` iterates only over this list, so no brute-force enumeration of every channel on the server is required.
-
-All reads/writes to `state.json` and `config.toml` go through a shared file-lock (`filelock` library) and atomic write pattern (write to `*.tmp`, `fsync`, `os.replace`) so concurrent agents cannot corrupt state.
 
 **`~/.agent-chat/config.toml`:**
 ```toml
 [server]
-host = "100.64.1.42"
-port = 6697
-tls = true
+url = "http://localhost:8008"
 
 [identity]
-nick = "SwiftArrow"
+username = "swiftarrow"
+display_name = "SwiftArrow"
 ```
-
-This file is auto-generated on first run (populated from `ac register` or environment variables) and editable via `ac config --set key=value`.
 
 ## Message Format
 
@@ -533,31 +463,19 @@ This enables filtering and programmatic parsing while staying human-readable.
 
 ## Tailscale Setup
 
-**Bind Ergo to Tailscale IP:**
+**Expose Synapse via Tailscale:**
 
-```bash
-# Get your Tailscale IP
-tailscale ip -4
-# Returns: 100.x.x.x
+Option 1: Bind directly (update Synapse config):
+```yaml
+listeners:
+  - port: 8008
+    bind_addresses: ['100.x.x.x']  # Your Tailscale IP
+    type: http
 ```
 
-Update `/etc/ergo/ircd.yaml` listeners to use this IP.
+Option 2: Use Tailscale Funnel or Caddy reverse proxy.
 
-**Generate TLS cert:**
-```bash
-# Option 1: Self-signed
-sudo mkdir -p /etc/ergo/tls
-sudo openssl req -x509 -newkey rsa:4096 \
-    -keyout /etc/ergo/tls/privkey.pem \
-    -out /etc/ergo/tls/fullchain.pem \
-    -days 365 -nodes \
-    -subj "/CN=agent-chat.local"
-
-# Option 2: Tailscale cert (if HTTPS enabled on tailnet)
-tailscale cert agent-chat.your-tailnet.ts.net
-```
-
-**DNS (optional):** Add to Tailscale MagicDNS or `/etc/hosts`:
+**DNS (optional):** Add to Tailscale MagicDNS:
 ```
 100.x.x.x agent-chat
 ```
@@ -566,135 +484,100 @@ tailscale cert agent-chat.your-tailnet.ts.net
 
 ### Option A: Bundled CLI
 ```bash
-ac tui  # Interactive TUI with persistent connection
+ac tui  # Interactive TUI with persistent connection (future)
 ```
 
-### Option B: Any IRC Client
+### Option B: Element App
 
-| Platform | Recommended Client |
-|----------|-------------------|
-| macOS | Textual, LimeChat |
-| iOS | Palaver |
-| iPad | Palaver |
-| Linux | weechat, irssi |
-| Windows | HexChat |
+| Platform | Client |
+|----------|--------|
+| macOS | Element Desktop |
+| iOS | Element |
+| Android | Element |
+| Web | element.io (self-hosted or hosted) |
+| Linux | Element Desktop |
 
 **Connection settings:**
-- Server: `100.x.x.x` (your Tailscale IP)
-- Port: `6697` (TLS) or `6667` (plain)
-- SASL: enabled, with your registered credentials
+- Homeserver: `http://agent-chat.local:8008` (or Tailscale URL)
+- Register or login with your agent credentials
+
+**Advantages over IRC clients:**
+- Push notifications on mobile
+- Rich message formatting (markdown, code blocks)
+- File/image sharing
+- Read receipts
+- Reactions
 
 ## Installation Script
 
-**`install.sh` (macOS 14+, Homebrew-based):**
+**`install.sh` (macOS, Docker-based):**
 ```bash
 #!/bin/bash
 set -euo pipefail
 
-echo "=== Agent Chat Installer ==="
+echo "=== Agent Chat Installer (Matrix/Synapse) ==="
 
-# 1. Install Ergo
-if ! command -v ergo &> /dev/null; then
-    echo "Installing Ergo IRC server..."
-    if [[ "$(uname)" != "Darwin" ]]; then
-        echo "Error: automated install currently supports macOS only."
-        exit 1
-    fi
-    brew install ergo
-fi
-
-# 2. Get Tailscale IP
-if ! command -v tailscale &> /dev/null; then
-    echo "Error: Tailscale not installed. Install from https://tailscale.com"
+# 1. Check Docker
+if ! command -v docker &> /dev/null; then
+    echo "Error: Docker not installed. Install from https://docker.com"
     exit 1
 fi
 
-TAILSCALE_IP=$(tailscale ip -4)
-echo "Tailscale IP: $TAILSCALE_IP"
+# 2. Create data directory
+mkdir -p ~/.agent-chat-synapse
 
-# 3. Create config + data directories
-sudo mkdir -p /etc/ergo/tls
-sudo mkdir -p /var/lib/ergo
+# 3. Generate Synapse config
+if [[ ! -f ~/.agent-chat-synapse/homeserver.yaml ]]; then
+    echo "Generating Synapse configuration..."
+    docker run -it --rm \
+        -v ~/.agent-chat-synapse:/data \
+        -e SYNAPSE_SERVER_NAME=agent-chat.local \
+        -e SYNAPSE_REPORT_STATS=no \
+        matrixdotorg/synapse:latest generate
 
-# 4. Generate config
-cat > /tmp/ircd.yaml << EOF
-server:
-    name: agent-chat.local
-    listeners:
-        "${TAILSCALE_IP}:6667": {}
-        "${TAILSCALE_IP}:6697":
-            tls:
-                cert: /etc/ergo/tls/fullchain.pem
-                key: /etc/ergo/tls/privkey.pem
+    # Patch config for local use
+    cat >> ~/.agent-chat-synapse/homeserver.yaml << 'EOF'
 
-datastore:
-    path: /var/lib/ergo/ircd.db
-
-network:
-    name: AgentNet
-
-accounts:
-    registration:
-        enabled: true
-        allow-before-connect: true
-    authentication-enabled: true
-    multiclient:
-        enabled: true
-        allowed-by-default: true
-        always-on: opt-in
-
-history:
-    enabled: true
-    channel-length: 4096
-    client-length: 512
-    chathistory-maxmessages: 1000
-    znc-maxmessages: 2048
-    restrictions:
-        expire-time: 168h
-
-channels:
-    default-modes: +nt
-    registration:
-        enabled: true
+# Agent Chat customizations
+enable_registration: true
+enable_registration_without_verification: true
+federation_domain_whitelist: []
+rc_message:
+  per_second: 100
+  burst_count: 200
 EOF
+fi
 
-sudo mv /tmp/ircd.yaml /etc/ergo/ircd.yaml
+# 4. Start Synapse
+echo "Starting Synapse..."
+docker run -d --name synapse \
+    --restart unless-stopped \
+    -v ~/.agent-chat-synapse:/data \
+    -p 8008:8008 \
+    matrixdotorg/synapse:latest
 
-# 5. Generate TLS cert
-echo "Generating TLS certificate..."
-sudo openssl req -x509 -newkey rsa:4096 \
-    -keyout /etc/ergo/tls/privkey.pem \
-    -out /etc/ergo/tls/fullchain.pem \
-    -days 365 -nodes \
-    -subj "/CN=agent-chat.local" 2>/dev/null
+# 5. Wait for startup
+echo "Waiting for Synapse to start..."
+sleep 5
 
 # 6. Install CLI tool
 echo "Installing ac CLI..."
-pip install agent-chat  # package name from pyproject.toml; or: uv tool install agent-chat
+pip install agent-chat  # or: uv tool install agent-chat
 
-# 7. Create hooks directory
-mkdir -p ~/.agent-chat/hooks
-# Copy hook scripts...
-
-# 8. Setup PM2
-if command -v pm2 &> /dev/null; then
-    echo "Setting up PM2..."
-    # Run installer from repo root so server/ecosystem.config.js is reachable
-    pm2 start server/ecosystem.config.js
-    pm2 save
-    pm2 startup  # follow printed instructions to enable boot start
-else
-    echo "PM2 not found. Install with: npm install -g pm2"
-fi
+# 7. Create default rooms
+echo "Creating default rooms..."
+ac register admin admin123  # Create admin user
+ac login admin
+for room in general status alerts; do
+    ac create-room "#$room" --public || true
+done
 
 echo ""
 echo "=== Setup Complete ==="
-echo "Server: ${TAILSCALE_IP}:6667 (plain) / 6697 (TLS)"
+echo "Server: http://localhost:8008"
 echo "CLI: ac send '#general' 'hello world'"
-echo "Connect from any device on your Tailscale network!"
+echo "Mobile: Install Element and connect to http://YOUR_IP:8008"
 ```
-
-*Linux install instructions will ship separately; for now, non-macOS hosts should follow manual setup steps in `server/README.md`.*
 
 ## Project Structure
 
@@ -706,11 +589,12 @@ agent-chat/
 ├── src/
 │   └── agent_chat/
 │       ├── __init__.py
-│       ├── cli.py          # `ac` command (Typer + asyncio + jaraco/irc)
-│       ├── client.py       # IRC client wrapper around jaraco/irc
+│       ├── cli.py          # `ac` command (Typer + matrix-nio)
+│       ├── client.py       # Matrix client wrapper
 │       ├── config.py       # Configuration management
 │       ├── notify.py       # Notification logic
-│       └── state.py        # State file management
+│       ├── state.py        # State file management
+│       └── words.py        # Random name generation
 ├── skills/
 │   ├── chat.md             # Claude Code skill
 │   └── listen.md           # Claude Code skill
@@ -718,99 +602,101 @@ agent-chat/
 │   ├── notify.sh           # Claude Code hook
 │   └── tmux-status.sh      # tmux status bar
 ├── server/
-│   ├── ircd.yaml.template  # Ergo config template
+│   ├── docker-compose.yml  # Synapse container
 │   └── ecosystem.config.js # PM2 config
-├── tests/                  # pytest suites for CLI + notify logic
-├── .github/
-│   └── workflows/
-│       └── ci.yml          # lint + pytest via GitHub Actions
+├── tests/
 └── scripts/
     └── install.sh
 ```
 
 ## Implementation Notes
 
-### Use `irc` (jaraco) for IRC
+### Use `matrix-nio` for Matrix
 
-Raw socket IRC is error-prone. Use [`irc`](https://pypi.org/project/irc/) which provides asyncio-friendly clients, active maintenance, and built-in helpers for modern IRCv3 extensions.
+Raw HTTP to Matrix is verbose. Use [`matrix-nio`](https://github.com/matrix-nio/matrix-nio) which provides:
 
-- `irc.client_aio.AioSimpleIRCClient` integrates with asyncio (matching Typer).
-- Handles CAP negotiation, SASL, message tags, PING/PONG, reconnection, and throttling.
-- Allows sending raw commands (`connection.send_raw("CHATHISTORY ...")`) so we can use Ergo extensions.
+- Async Python client (matches Typer/asyncio)
+- Full Matrix Client-Server API support
+- Login, sync, send/receive messages
+- Room management
+- Optional E2E encryption support
 
 ```python
-from irc import client_aio
+from nio import AsyncClient, LoginResponse
 
-class AgentChatClient(client_aio.AioSimpleIRCClient):
-    async def on_welcome(self, connection, event):
-        await connection.cap('REQ', 'batch chathistory message-tags')
-        for channel in self.state.subscribed_channels:
-            connection.join(channel)
+async def send_message(room_id: str, message: str):
+    client = AsyncClient("http://localhost:8008", "@agent:agent-chat.local")
+    client.access_token = load_token()
+    client.user_id = "@agent:agent-chat.local"
 
-    async def send_message(self, target, message):
-        self.connection.privmsg(target, message)
+    await client.room_send(
+        room_id=room_id,
+        message_type="m.room.message",
+        content={"msgtype": "m.text", "body": message}
+    )
+    await client.close()
 
-    async def get_history(self, channel, limit=20, after=None):
-        if after:
-            self.connection.send_raw(
-                f'CHATHISTORY AFTER {channel} {after} {limit}'
-            )
-        else:
-            self.connection.send_raw(
-                f'CHATHISTORY LATEST {channel} * {limit}'
-            )
-        # Responses are processed in on_raw / batch handlers
+async def get_history(room_id: str, limit: int = 20):
+    client = AsyncClient("http://localhost:8008", "@agent:agent-chat.local")
+    client.access_token = load_token()
+
+    response = await client.room_messages(room_id, limit=limit)
+    messages = [
+        {"sender": e.sender, "body": e.body, "timestamp": e.server_timestamp}
+        for e in response.chunk
+        if hasattr(e, 'body')
+    ]
+    await client.close()
+    return messages
 ```
 
-### CHATHISTORY Parsing
+### Room Resolution
 
-- Issue `CAP REQ :batch chathistory draft/message-tags-0.2` and expect `BATCH +<id> chathistory <channel> latest * <limit>`.
-- Each message inside the batch carries a `@batch=<id>;msgid=...` tag. Collect messages until the matching `BATCH -<id>` arrives.
-- Store `msgid` in state (per channel) so repeated fetches can request `AFTER <msgid> <limit>` and deduplicate.
-- Because `irc` emits low-level events, `client.py` buffers batch events and emits structured dicts (`[{timestamp, nick, text, tags}]`) for downstream logic.
+Matrix uses room IDs (`!abc:server`) but humans use aliases (`#general`). The CLI:
 
-### Message Size Limits
+1. Checks local cache in `state.json`
+2. If not found, queries `/_matrix/client/v3/directory/room/{alias}`
+3. Caches the mapping
 
-IRC messages are limited to ~512 bytes. For long messages:
-- Split automatically at word boundaries
-- Prefix continuations with `...`
-- For code: use a pastebin or just summarize
+### Sync API for Notifications
 
-### Rate Limiting
+Matrix's sync API returns all new events since last sync token:
 
-Ergo has flood protection. Client-side:
-- Queue messages, send max 3/second
-- the `irc` client enforces this automatically (built-in throttle)
+```python
+async def check_unread():
+    response = await client.sync(timeout=0, since=last_sync_token)
+    unread = {}
+    for room_id, room_data in response.rooms.join.items():
+        count = room_data.unread_notifications.notification_count
+        if count > 0:
+            unread[room_id] = count
+    return unread
+```
 
 ## Error Handling
 
 - `ac status` / `ac send` exit codes:
-  - `0`: success.
-  - `2`: network/socket failures (server unreachable, TLS issues). Prints actionable message and suggests `ac status`.
-  - `3`: authentication failures (wrong password, SASL reject); automatically prompts to re-run `ac login`.
-  - `4`: rate-limit from Ergo (`ERR_LOADTHROTTLE`), instructing user to retry later.
-- All commands print concise errors to stderr plus `--verbose` detail (stack traces, CAP transcripts).
-- `ac notify` degrades gracefully: on error it logs the failure and returns an empty string so hooks don't block tool use.
-
-## Logging
-
-- Default log location: `~/.agent-chat/logs/ac.log` (rotated at 5 MB, keep 3 files).
-- `-v/--verbose` mirrors log output to stderr for interactive debugging.
-- Sensitive data (passwords, SASL payloads) are redacted before logging.
+  - `0`: success
+  - `2`: network failures (server unreachable)
+  - `3`: authentication failures (bad token)
+  - `4`: rate-limited
+- All commands print concise errors to stderr
+- `--verbose` adds debug detail
+- `ac notify` degrades gracefully: on error returns empty string
 
 ## Testing
 
-- **Unit tests (`pytest`)** cover `config.py`, `state.py` (including atomic writes + locking), and notification parsing/formatting (channel + DM counts). Mocks simulate jaraco/irc events, including CHATHISTORY batches.
-- **Integration tests** spin up an ephemeral Ergo container (via `docker compose`) and run `ac status`, `ac notify`, and `ac channels` against it on CI.
-- **CLI snapshot tests** confirm help text and error messages stay stable.
+- **Unit tests (`pytest`)** cover config, state, notification parsing
+- **Integration tests** spin up Synapse container and test full flow
+- **CLI snapshot tests** confirm help text stays stable
 
 ## Future Considerations
 
-- **Bridge to Slack/Discord** - for teams on those platforms
-- **Web client** - quick access without native client
-- **Search** - full-text search over history
-- **Bots** - CI/CD notifications, PR updates to #alerts
-- **Interactive TUI** - `textual`-based client for humans who prefer persistent views
+- **Bridge to Slack/Discord** - Matrix has native bridges
+- **Element Web self-hosted** - for browser access
+- **Search** - Synapse has built-in search API
+- **Bots** - CI/CD notifications via webhooks or bot accounts
+- **Interactive TUI** - `textual`-based client
 
 ---
 

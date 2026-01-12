@@ -1,79 +1,91 @@
+"""Configuration management for agent-chat."""
 from __future__ import annotations
 
 import dataclasses
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import tomllib
 from filelock import FileLock
+
+try:
+    import keyring
+    KEYRING_AVAILABLE = True
+except ImportError:
+    keyring = None  # type: ignore
+    KEYRING_AVAILABLE = False
 
 APP_DIR = Path(os.environ.get("AGENT_CHAT_HOME", Path.home() / ".agent-chat"))
 CONFIG_FILE = APP_DIR / "config.toml"
 CREDENTIALS_FILE = APP_DIR / "credentials.json"
 LOCK_FILE = CONFIG_FILE.with_suffix(".lock")
 SERVICE_NAME = "agent-chat"
-DEFAULT_CHANNELS = ["#general", "#status", "#alerts"]
+DEFAULT_ROOMS = ["#general", "#status", "#alerts"]
 
 
 @dataclasses.dataclass
 class ServerConfig:
-    host: str = "127.0.0.1"
-    port: int = 6697
-    tls: bool = True
+    """Matrix homeserver configuration."""
+    url: str = "http://localhost:8008"
 
 
 @dataclasses.dataclass
 class IdentityConfig:
-    nick: str = ""
-    realname: str = "Agent Chat"
+    """User identity configuration."""
+    username: str = ""
+    display_name: str = "Agent Chat"
 
 
 @dataclasses.dataclass
 class AgentChatConfig:
+    """Main configuration container."""
     server: ServerConfig
     identity: IdentityConfig
 
     @classmethod
     def load(cls) -> "AgentChatConfig":
+        """Load configuration from file or create defaults."""
         APP_DIR.mkdir(parents=True, exist_ok=True)
         if CONFIG_FILE.exists():
             data = tomllib.loads(CONFIG_FILE.read_text())
         else:
             data = {}
+
         server_tbl = data.get("server", {})
         if not server_tbl:
-            server_tbl = {"host": "127.0.0.1", "port": 6697, "tls": True}
+            server_tbl = {"url": "http://localhost:8008"}
+
         identity_tbl = data.get("identity", {})
         if not identity_tbl:
-            identity_tbl = {"nick": "", "realname": "Agent Chat"}
+            identity_tbl = {"username": "", "display_name": "Agent Chat"}
+
         config = cls(
             server=ServerConfig(
-                host=str(server_tbl.get("host", "127.0.0.1")),
-                port=int(server_tbl.get("port", 6697)),
-                tls=bool(server_tbl.get("tls", True)),
+                url=str(server_tbl.get("url", "http://localhost:8008")),
             ),
             identity=IdentityConfig(
-                nick=str(identity_tbl.get("nick", "")),
-                realname=str(identity_tbl.get("realname", "Agent Chat")),
+                username=str(identity_tbl.get("username", "")),
+                display_name=str(identity_tbl.get("display_name", "Agent Chat")),
             ),
         )
+
         if not CONFIG_FILE.exists():
             config.save()
+
         return config
 
     def save(self) -> None:
+        """Save configuration to file."""
         APP_DIR.mkdir(parents=True, exist_ok=True)
         lines = [
             "[server]",
-            f"host = \"{self.server.host}\"",
-            f"port = {self.server.port}",
-            f"tls = {str(self.server.tls).lower()}",
+            f'url = "{self.server.url}"',
             "",
             "[identity]",
-            f"nick = \"{self.identity.nick}\"",
-            f"realname = \"{self.identity.realname}\"",
+            f'username = "{self.identity.username}"',
+            f'display_name = "{self.identity.display_name}"',
             "",
         ]
         doc = "\n".join(lines)
@@ -81,36 +93,71 @@ class AgentChatConfig:
             CONFIG_FILE.write_text(doc)
 
 
-def read_credentials_meta() -> Dict[str, Any]:
+def get_credentials() -> Optional[Dict[str, Any]]:
+    """Get stored Matrix credentials (access_token, user_id, device_id)."""
     if not CREDENTIALS_FILE.exists():
-        return {"passwords": {}}
+        return None
+
     with CREDENTIALS_FILE.open("r", encoding="utf-8") as fh:
         data = json.load(fh)
-    if "passwords" not in data:
-        data["passwords"] = {}
+
+    if "access_token" not in data:
+        return None
+
     return data
 
 
-def _write_credentials(meta: Dict[str, Any]) -> None:
+def set_credentials(
+    user_id: str,
+    access_token: str,
+    device_id: str = "",
+) -> None:
+    """Store Matrix credentials."""
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    with CREDENTIALS_FILE.open("w", encoding="utf-8") as fh:
-        json.dump(meta, fh, indent=2)
+
+    data = {
+        "user_id": user_id,
+        "access_token": access_token,
+        "device_id": device_id,
+    }
+
+    # Also try to store in keyring for extra security
+    if KEYRING_AVAILABLE and keyring is not None:
+        try:
+            keyring.set_password(SERVICE_NAME, user_id, access_token)
+        except Exception:
+            pass  # Fall through to JSON storage
+
+    with FileLock(str(LOCK_FILE)):
+        with CREDENTIALS_FILE.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
 
 
-def get_password(nick: str) -> str | None:
-    if not nick:
-        return None
-    meta = read_credentials_meta()
-    return meta.get("passwords", {}).get(nick)
+def clear_credentials() -> None:
+    """Clear stored credentials."""
+    if CREDENTIALS_FILE.exists():
+        with FileLock(str(LOCK_FILE)):
+            CREDENTIALS_FILE.unlink()
+
+
+# Legacy compatibility
+def read_credentials_meta() -> Dict[str, Any]:
+    """Read credentials metadata (legacy compatibility)."""
+    creds = get_credentials()
+    if creds:
+        return creds
+    return {}
+
+
+def get_password(nick: str) -> Optional[str]:
+    """Get password (legacy compatibility - returns access token)."""
+    creds = get_credentials()
+    if creds:
+        return creds.get("access_token")
+    return None
 
 
 def set_password(nick: str, password: str) -> None:
-    meta = read_credentials_meta()
-    meta.setdefault("passwords", {})[nick] = password
-    _write_credentials(meta)
-
-
-def write_credentials_meta(update: Dict[str, Any]) -> None:
-    meta = read_credentials_meta()
-    meta.update({k: v for k, v in update.items() if k != "password"})
-    _write_credentials(meta)
+    """Set password (legacy compatibility)."""
+    # This is a no-op for Matrix - use set_credentials instead
+    pass

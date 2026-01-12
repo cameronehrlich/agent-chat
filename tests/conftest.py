@@ -24,6 +24,7 @@ def isolated_home(tmp_path, monkeypatch):
     logging_mod.LOG_DIR = home / "logs"
     logging_mod.LOG_FILE = logging_mod.LOG_DIR / "ac.log"
 
+    # Mock keyring for tests
     store = {}
 
     class FakeKeyring:
@@ -34,4 +35,5 @@ def isolated_home(tmp_path, monkeypatch):
             return store.get((service, user))
 
     config_mod.keyring = FakeKeyring()
+    config_mod.KEYRING_AVAILABLE = True
     yield

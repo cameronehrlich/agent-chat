@@ -21,6 +21,7 @@ TAILSCALE_IP=$(tailscale ip -4)
 echo "Tailscale IP: $TAILSCALE_IP"
 
 sudo mkdir -p /etc/ergo/tls
+sudo mkdir -p /var/lib/ergo
 cat > /tmp/ircd.yaml <<EOFCONF
 server:
     name: agent-chat.local
@@ -30,6 +31,8 @@ server:
             tls:
                 cert: /etc/ergo/tls/fullchain.pem
                 key: /etc/ergo/tls/privkey.pem
+datastore:
+    path: /var/lib/ergo/ircd.db
 network:
     name: AgentNet
 accounts:
